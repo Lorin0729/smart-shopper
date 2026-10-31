@@ -1,0 +1,47 @@
+# 云端免费定时监控：无需自己开电脑。
+#
+# 使用方法（一次性配置）：
+# 1. 本仓库页 -> Settings -> Secrets and variables -> Actions -> New repository secret
+#    名称：SMART_SHOPPER_CONFIG
+#    值：把整个 config.json 的内容粘进去（含 Server酱/钉钉/Telegram 等通知配置）
+# 2. 本地先在 shopper.db 中 add 好要跟踪的商品，把 shopper.db 一起提交到仓库
+#    （或 fork 后手动改），云端每轮监控会延续这些商品与历史价格。
+# 3. Actions 默认每 6 小时跑一轮，也可在 Actions 页面手动触发（workflow_dispatch）。
+# 提示： shopper.db 已在 .gitignore 中；如走“提交 db”方案，请用
+#        `git add -f shopper.db`，并理解价格历史会随之公开（私有仓库则无此顾虑）。
+
+name: Scheduled Price Check
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # 每 6 小时一轮（UTC）
+  workflow_dispatch:
+
+concurrency:
+  group: price-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore price database
+        uses: actions/cache@v4
+        with:
+          path: shopper.db
+          key: shopper-db-${{ github.run_id }}
+          restore-keys: shopper-db-
+
+      - name: Run price check
+        env:
+          SMART_SHOPPER_CONFIG: ${{ secrets.SMART_SHOPPER_CONFIG }}
+        run: python main.py check

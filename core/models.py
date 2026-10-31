@@ -21,6 +21,7 @@ class Product:
     name: str = ""
     category: str = "general"  # 见 predictor/season.py 的类目档案
     launch_date: str | None = None  # 发售/上架日 ISO，如 2026-09-15
+    target_price: float | None = None  # 目标价：价格降到该值即提醒
     added_at: float = field(default_factory=time.time)
 
     def display_id(self) -> str:

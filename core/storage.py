@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS products (
     name       TEXT DEFAULT '',
     category   TEXT DEFAULT 'general',
     launch_date TEXT,
+    target_price REAL,
     added_at   REAL
 );
 CREATE TABLE IF NOT EXISTS prices (
@@ -42,16 +43,23 @@ class Store:
         self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """旧库升级：缺列则补。"""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(products)")}
+        if "target_price" not in cols:
+            self.conn.execute("ALTER TABLE products ADD COLUMN target_price REAL")
 
     # ---------- 商品 ----------
     def add_product(self, p: Product) -> bool:
         """新增商品，已存在则返回 False。"""
         try:
             self.conn.execute(
-                "INSERT INTO products VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO products VALUES (?,?,?,?,?,?,?,?,?)",
                 (p.display_id(), p.platform, p.pid, p.url, p.name,
-                 p.category, p.launch_date, p.added_at),
+                 p.category, p.launch_date, p.target_price, p.added_at),
             )
             self.conn.commit()
             return True
@@ -60,8 +68,8 @@ class Store:
 
     def update_product(self, p: Product) -> None:
         self.conn.execute(
-            "UPDATE products SET name=?, category=?, launch_date=? WHERE display_id=?",
-            (p.name, p.category, p.launch_date, p.display_id()),
+            "UPDATE products SET name=?, category=?, launch_date=?, target_price=? WHERE display_id=?",
+            (p.name, p.category, p.launch_date, p.target_price, p.display_id()),
         )
         self.conn.commit()
 
@@ -95,7 +103,8 @@ class Store:
     def _row_to_product(r: sqlite3.Row) -> Product:
         return Product(
             platform=r["platform"], pid=r["pid"], url=r["url"], name=r["name"],
-            category=r["category"], launch_date=r["launch_date"], added_at=r["added_at"],
+            category=r["category"], launch_date=r["launch_date"],
+            target_price=r["target_price"], added_at=r["added_at"],
         )
 
     # ---------- 价格 ----------
