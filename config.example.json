@@ -1,0 +1,8 @@
+{
+  "db": "shopper.db",
+  "check_interval_seconds": 3600,
+  "jd": { "area": "1_72_2799_0", "cat": "", "venderId": "" },
+  "uniqlo": { "api_template": "" },
+  "taobao": { "cookie": "" },
+  "notify": { "serverchan_key": "", "webhook_url": "" }
+}
