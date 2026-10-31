@@ -55,7 +55,20 @@ class TaobaoMonitor(BaseMonitor):
                 p = float(m.group(1))
                 if p > 0:
                     return PricePoint(ts=self.now(), price=p), None
-        raise MonitorError("未能从淘宝页面解析价格（页面结构变更或需要滑块验证）")
+
+        # 页面结构变化时尝试浏览器渲染兜底
+        rendered = self._maybe_render(url, cookie=cookie)
+        if rendered:
+            for pat in _PATTERNS:
+                m = re.search(pat, rendered)
+                if m:
+                    p = float(m.group(1))
+                    if p > 0:
+                        return PricePoint(ts=self.now(), price=p), None
+        raise MonitorError(
+            "未能从淘宝页面解析价格（页面结构变更或需要滑块验证）。"
+            "可更新 Cookie，或安装 playwright 启用渲染兜底。"
+        )
 
     @staticmethod
     def extract_name(html: str) -> str:

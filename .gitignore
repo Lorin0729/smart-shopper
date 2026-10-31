@@ -11,6 +11,13 @@ config.json
 my_coupons.json
 cart.json
 
+# 生成的产物
+report.html
+chart_*.svg
+chart_*.png
+chart_*.html
+price_log.csv
+
 # IDE / 系统
 .idea/
 .vscode/

@@ -1,55 +1,87 @@
 # Smart Shopper — 降价监控 · 优惠叠加最优解 · 购买时机预测
 
-一个本地优先（local-first）的网购省钱工具：
+一个本地优先（local-first）的网购省钱工具，零服务器成本即可 7×24 监控。
 
-- **优衣库 / 京东 / 淘宝 降价监控**：定时抓取价格，降价、历史新低、补货立即提醒
-- **目标价提醒**：`add --target 500`，降到心理价位自动叫你，不用天天盯
-- **优惠叠加计算器**：店铺券、跨店满减、会员折扣、红包、京豆/淘金币……穷举所有合法叠加组合，给出到手最低价与 TOP N 方案
-- **购买时机预测**：基于历史降价节奏 + 平台大促日历（618 / 双11 / 双12 / 年货节…）估计未来 30 天降价概率与窗口
-- **季节类目模型**：回答“羽绒服发售多久后买最划算”这类问题——9 月上新定价最硬，双11 出现首个深折扣，次年 2 月中~3 月底季末清仓约 6.5 折是全年最低窗口
-- **库存感知推荐**：结合库存状态（现货/无货/紧张/剩余件数）给出「立即购买 / 尽快入手 / 建议等待 / 关注补货」决策
-- **终端走势图 + CSV 导出**：`▁▂▄█▅` 一眼看出当前价在历史中的位置
-- **多渠道通知**：Server酱（微信）/ 钉钉 / 企业微信 / Telegram / 通用 Webhook
-- **云端免费监控**：一条 GitHub Actions workflow，无需自己开电脑（见下文）
+**监控与预警**
 
-## 快速开始
+- 优衣库 / 京东 / 淘宝·天猫 价格与库存定时抓取，降价、历史新低、补货即时推送
+- 目标价提醒：`--target 500`，只在价格「穿越」目标价时提醒一次，不重复轰炸
+- 尺码/SKU 级库存：`--size M`，只关心你穿的码，M 码补货单独通知
+- 多渠道通知：Server酱（微信）/ 钉钉 / 企业微信 / Telegram / 邮件 SMTP / 通用 Webhook
+- 云端免费监控：GitHub Actions 定时跑，产物 HTML 报告自动上传为 Artifact
+
+**省钱计算**
+
+- 优惠叠加计算器：店铺券、跨店满减、会员折扣、红包、京豆/淘金币……穷举所有合法叠加组合，给出到手最低价与 TOP N 方案
+- 多商品组合凑单：一起下单能吃到几档满减？再凑 ¥120 换 ¥50 值不值？分开买 vs 一起买差多少？
+
+**购买时机预测**
+
+- 历史统计：最低/最高/均价、价格分位、降价间隔与平均降幅、终端走势图
+- 降价概率：历史降价节奏 + 平台大促日历（618 / 双11 / 双12 / 年货节…）融合估计未来 30 天
+- 季节类目模型：回答“羽绒服发售多久后买最划算”——9 月上新定价最硬，双11 首个深折扣，次年 2 月中~3 月底季末清仓约 6.5 折是全年最低窗口
+- 库存感知推荐：结合库存状态给出「立即购买 / 尽快入手 / 建议等待 / 关注补货」
+
+**可视化与冷启动**
+
+- 终端走势图 `▁▂▄█▅`、SVG/HTML/PNG 图表导出
+- 自包含 HTML 报告：价格曲线 + 统计 + 预测 + 季节窗口，一个文件可直接分享
+- 第三方历史价冷启动（慢慢买）或 CSV 导入，新商品添加即拥有历史数据
+
+## 一键开始
 
 ```bash
+# 方式一：直接运行（无需安装）
 pip install -r requirements.txt
-
-# 离线演示（无需任何配置，模拟一件羽绒服的完整分析链路）
 python main.py demo
 
-# 一键生成配置文件
-python main.py init
-
-# 添加跟踪商品（--target 设置目标价，可选）
-python main.py add "https://item.jd.com/100012043978.html" --category 羽绒服 --launch 2026-09-15 --target 500
-
-# 立即抓取一轮（降价/新低/达标/补货会打印并可推送）
-python main.py check
-
-# 持续监控，每 3600 秒一轮
-python main.py check --watch --interval 3600
-
-# 查看分析报告：历史统计 + 走势图 + 降价预测 + 购买窗口 + 建议
-python main.py list
-python main.py analyze 1
-
-# 价格历史与导出
-python main.py history 1 --days 30 --csv price_log.csv
-
-# 优惠叠加：¥899 的商品叠大促券（内置演示券）
-python main.py deal --price 899 --platform jd
-
-# 使用自己的券配置
-python main.py deal --price 899 --platform taobao --coupons my_coupons.json
-
-# 购物车跨店凑单优化
-python main.py cart cart.json
+# 方式二：安装成命令行工具
+pip install -e .
+smart-shopper demo
+# 可选增强
+pip install -e ".[chart]"    # PNG 图表（matplotlib）
+pip install -e ".[render]" && playwright install chromium   # 渲染兜底
 ```
 
-`my_coupons.json` 示例：
+## 常用命令
+
+```bash
+# 1. 生成配置（可选，默认值即可跑）
+python main.py init
+
+# 2. 添加商品：目标价 + 关注尺码
+python main.py add "https://item.jd.com/100012043978.html" \
+  --category 羽绒服 --launch 2026-09-15 --target 500 --size M
+python main.py add "https://www.uniqlo.cn/product-detail.html?productCode=u0000000064781" \
+  --name 摇粒绒外套 --category 大衣 --target 199
+
+# 3. 补历史价（让预测立刻可用），或用 --csv 导入自己的数据
+python main.py seed 1
+python main.py seed 1 --csv history.csv      # 表头 datetime,price
+
+# 4. 监控
+python main.py check                          # 抓一轮
+python main.py check --watch --interval 3600  # 持续监控
+
+# 5. 看报告
+python main.py list
+python main.py analyze 1                      # 终端详细分析
+python main.py report --out report.html       # HTML 报告（可分享）
+python main.py chart 1 --format png           # 走势图：svg/html/png
+python main.py history 1 --days 30 --csv price_log.csv
+
+# 6. 省钱计算
+python main.py deal --price 899 --platform jd           # 单品叠券 TOP3
+python main.py cart cart.json                           # 购物车跨店凑单
+python main.py bundle --filler-max 150                  # 已跟踪商品组合购买
+python main.py bundle --file bundle.json                # 自定义组合
+
+# 7. 维护
+python main.py edit 1 --target 450 --size L             # 改目标价/尺码
+python main.py rm 1
+```
+
+`my_coupons.json`（`deal --coupons` / `bundle --coupons`）：
 
 ```json
 [
@@ -61,7 +93,7 @@ python main.py cart cart.json
 ]
 ```
 
-`cart.json` 示例：
+`cart.json` / `bundle.json`（含商品与店铺）：
 
 ```json
 {
@@ -76,53 +108,64 @@ python main.py cart cart.json
 }
 ```
 
-## 分析报告长什么样
+## 输出示例
 
 ```
-==============================================================
 商品分析：加厚羽绒夹克   [jd]
-==============================================================
-当前价 ¥819 | 最低 ¥819 | 最高 ¥899 | 均价 ¥871.5 | 采样 4 次
-价格分位 0% | 有效降价 3 次 | 平均间隔 17.5 天 | 平均降幅 4%
+目标价 ¥500（当前 ¥779，还差 ¥129）
+当前价 ¥779 | 最低 ¥759 | 最高 ¥899 | 均价 ¥837 | 采样 6 次
+价格分位 17% | 有效降价 3 次 | 平均间隔 17.5 天 | 平均降幅 6%
+走势 █▇█▄▁▂  （¥899 → ¥779）
 库存：有货 现货（剩 23 件）
+尺码库存（关注 M）：L:有货  M:有货  S:无货
 --------------------------------------------------------------
-◆ 降价预测（未来 30 天）：概率 25%
+◆ 降价预测（未来 30 天）：概率 35%
   预计窗口：10-31 ~ 11-11
-  依据：30 天内有大促「双11」（峰值 11-11）……
---------------------------------------------------------------
 ◆ 购买时机（类目：羽绒服）
   1. [羽绒服季末清仓] 2027-02-10 ~ 2027-03-28  预期 6.5 折
-  2. [发售 90~150 天折扣深水期] 2026-12-14 ~ 2027-01-29  预期 7.2 折
+  2. [发售 90~150 天折扣深水期] 2026-12-14 ~ 2027-02-12  预期 7.2 折
   3. [双11] 2026-10-20 ~ 2026-11-13  预期 7.5 折 ← 当前正处于该窗口
-  ...
---------------------------------------------------------------
-◆ 购买建议：▶ 立即购买（决策分 85/100）
-  - 当前价 ¥819 已是历史最低附近
-  - 正处于「双11」窗口
+◆ 购买建议：▶ 建议等待（决策分 52/100）
+```
+
+组合凑单：
+
+```
+组合下单到手 ¥531.43（省 ¥247.57）
+分开买最优合计 ¥550.24，组合额外省 ¥18.81
+已触发：「跨店满减 每300减50」×2 档（共减 ¥100）
+· 再凑 ¥121.00 可多触发一档，多减 ¥50（净亏 ¥71.00，不建议硬凑）
 ```
 
 ## 目录结构
 
 ```
 smart-shopper/
-├── main.py                # CLI 入口（add/list/rm/check/analyze/deal/cart/history/init/demo）
+├── main.py                # CLI：add/edit/list/rm/check/analyze/history/seed/
+│                          #      chart/report/deal/cart/bundle/init/demo
+├── pyproject.toml         # 可 pip 安装（console script: smart-shopper）
 ├── core/
-│   ├── models.py          # Product / PricePoint / InventorySnapshot
-│   ├── storage.py         # SQLite 存储（商品、价格、库存历史，自动迁移）
-│   └── sparkline.py       # 终端价格走势图
+│   ├── models.py          # Product / PricePoint / InventorySnapshot / VariantSnapshot
+│   ├── storage.py         # SQLite（商品/价格/库存/尺码，自动迁移旧库）
+│   ├── sparkline.py       # 终端价格走势图
+│   └── report.py          # SVG 走势图 + 自包含 HTML 报告 + PNG（可选）
+├── datasource/            # 第三方历史价（慢慢买）+ CSV 导入
 ├── monitors/
-│   ├── uniqlo.py          # 优衣库官网（JSON-LD / 内嵌 JSON 解析，接口可配置）
-│   ├── jd.py              # 京东（p.3.cn 价格 + c0.3.cn 库存）
-│   └── taobao.py          # 淘宝/天猫（自备 Cookie，实验性）
-├── optimizer/deals.py     # 叠券穷举引擎 + 跨店凑单优化
+│   ├── uniqlo.py          # 优衣库：价格/库存/尺码，接口可配置
+│   ├── jd.py              # 京东：p.3.cn 价格 + c0.3.cn 库存 + SKU 尺码
+│   ├── taobao.py          # 淘宝/天猫：自备 Cookie（实验性）
+│   └── renderer.py        # Playwright 渲染兜底（可选依赖）
+├── optimizer/
+│   ├── deals.py           # 叠券穷举引擎
+│   └── bundle.py          # 多商品组合凑单规划
 ├── predictor/
 │   ├── forecast.py        # 历史统计、大促日历、降价概率、购买建议
-│   └── season.py          # 季节类目模型（羽绒服/大衣/夏装/球鞋…）
-├── notifier/              # 控制台 + Server酱/钉钉/企业微信/Telegram/Webhook
+│   └── season.py          # 季节类目模型
+├── notifier/              # Server酱/钉钉/企微/Telegram/邮件/Webhook
 ├── .github/workflows/
 │   ├── ci.yml             # 三版本 Python 跑测试
-│   └── scheduled-check.yml# 云端每 6 小时定时监控
-└── tests/                 # 单元测试（python -m unittest discover -s tests）
+│   └── scheduled-check.yml# 云端定时监控 + 报告 Artifact
+└── tests/                 # 38 个单元测试
 ```
 
 ## 配置
@@ -134,38 +177,42 @@ smart-shopper/
   "db": "shopper.db",
   "check_interval_seconds": 3600,
   "jd": { "area": "1_72_2799_0" },
-  "uniqlo": { "api_template": "" },
-  "taobao": { "cookie": "" },
+  "uniqlo": { "api_template": "", "playwright_fallback": true },
+  "taobao": { "cookie": "", "playwright_fallback": true },
   "notify": {
     "serverchan_key": "",
     "dingtalk_webhook": "",
     "wecom_webhook": "",
     "telegram_bot_token": "",
     "telegram_chat_id": "",
-    "webhook_url": ""
+    "webhook_url": "",
+    "email": {
+      "smtp_host": "smtp.qq.com", "smtp_port": 465,
+      "username": "", "password": "", "from": "", "to": ""
+    }
   }
 }
 ```
 
-- `jd.area`：库存查询的收货区域码（`1_72_2799_0` 为北京），不同区域库存可能不同
-- `notify.*`：通知渠道可同时启用多个；Server酱推微信，钉钉/企业微信填群机器人 Webhook，Telegram 填 Bot Token + Chat ID
+- `jd.area`：库存查询收货区域码（`1_72_2799_0` 为北京），不同区域库存不同
+- `notify.*`：多渠道可同时启用；邮件用 SMTP，465 端口走 SSL，587 走 STARTTLS
+- `playwright_fallback`：解析失败时是否用浏览器渲染兜底（需先安装 playwright）
 - 配置也可用环境变量 `SMART_SHOPPER_CONFIG`（JSON 字符串）注入，优先级高于文件——GitHub Actions 就是这样读 Secrets 的
 
 ## 部署到 GitHub Actions（免费云端监控）
 
-不想挂着电脑？把监控搬到 GitHub Actions，每 6 小时自动跑一轮并推送通知：
-
-1. 在本仓库 **Settings → Secrets and variables → Actions** 新建 secret，名称 `SMART_SHOPPER_CONFIG`，值为完整 config.json 内容（含通知渠道配置）
-2. 本地 `python main.py add ...` 添加商品后，强制提交数据库：`git add -f shopper.db && git commit && git push`（私有仓库无隐私顾虑；公开仓库请注意商品列表本身不敏感，Cookie 等只在 Secret 中）
-3. 完成。仓库自带 `.github/workflows/scheduled-check.yml`，会定时运行 `python main.py check`，通过 `actions/cache` 在多轮之间延续价格历史，命中目标价/降价/补货时推送到你的微信或钉钉
+1. 仓库 **Settings → Secrets and variables → Actions** 新建 secret：名称 `SMART_SHOPPER_CONFIG`，值为完整 config.json（含通知渠道配置）
+2. 本地 `python main.py add ...` 添加商品后强制提交数据库：`git add -f shopper.db && git commit && git push`
+3. 完成。`.github/workflows/scheduled-check.yml` 每 6 小时运行 `check`，用 `actions/cache` 延续价格历史，并把 `report.html` 作为 Artifact 上传，可直接下载查看
 
 也可在 Actions 页面手动触发（workflow_dispatch）立即检查一轮。
 
 ## 接口适配说明
 
-- **京东**：价格 `p.3.cn`、库存 `c0.3.cn` 是社区长期使用的公开端点，无需登录
-- **优衣库**：官网为前端渲染，默认走商品页 JSON-LD/内嵌 JSON 解析；若官网改版导致解析失败，可在 `uniqlo.api_template` 配置你抓包得到的 JSON 接口模板（`{}` 占位 productCode）
+- **京东**：价格 `p.3.cn`、库存 `c0.3.cn` 是社区长期使用的公开端点，无需登录；尺码 SKU 从商品页 `colorSize` 解析后逐个查库存（默认最多 12 个）
+- **优衣库**：默认解析商品页 JSON-LD/内嵌 JSON；若官网改版导致失败，可配置 `uniqlo.api_template`（`{}` 占位 productCode），或安装 Playwright 启用渲染兜底
 - **淘宝/天猫**：接口有签名与风控，须自备浏览器 Cookie（实验性，失效需更新）
+- **慢慢买**：`seed` 使用其非官方历史价端点，结构可能调整；失败时请用 `--csv` 导入
 
 抓取均为低频轮询（默认 1 小时一轮）。请遵守各平台服务条款，勿高频请求，数据仅供个人购物决策参考。
 
@@ -179,15 +226,23 @@ smart-shopper/
 | 季节模型 | 类目清仓月 + 发后天数（羽绒类 90~150 天） |
 | 库存 | 无货→关注补货；低价 + 库存紧张→尽快入手 |
 
-决策融合为 0-100 分，映射到「立即购买 / 尽快入手 / 建议等待 / 关注补货」。
+决策融合为 0-100 分，映射到「立即购买 / 尽快入手 / 建议等待 / 关注补货」。目标价提醒采用「穿越」判定，同一目标价只提醒一次。
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+覆盖：叠券数学、组合凑单、季节窗口、降价预测与建议、走势图/报告渲染、CSV 导入、SQLite 迁移与尺码存储。
 
 ## Roadmap
 
-- [ ] 慢慢买等第三方历史价数据源接入（新商品冷启动即有历史）
-- [ ] PNG 走势图导出（matplotlib 可选依赖）
-- [ ] SKU 级库存与尺码监控
-- [ ] Playwright 渲染兜底，提升优衣库/淘宝解析健壮性
-- [ ] 多商品组合“一起买最划算”建议（共用跨店满减档位）
+- [ ] 拼多多 / 唯品会 / 天猫超市 价格源
+- [ ] 尺码换算助手（优衣库/JD 尺码表对照）
+- [ ] 价格提醒的「冷却期」可视化配置（按商品自定义提醒频率）
+- [ ] Web UI（本地起一个只读面板）
+- [ ] 多用户/家庭共享购物清单
 
 ## 免责声明
 

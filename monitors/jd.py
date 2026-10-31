@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 
-from core.models import InventorySnapshot, PricePoint
+from core.models import InventorySnapshot, PricePoint, VariantSnapshot
 from .base import BaseMonitor, MonitorError
 
 STOCK_STATE = {
@@ -23,9 +23,18 @@ STOCK_STATE = {
     "40": ("无货", False),
 }
 
+ITEM_PAGE = "https://item.jd.com/{sku}.html"
+_COLOR_SIZE_PAT = re.compile(r"colorSize\s*:\s*(\[[^\]]{0,30000}\])", re.I)
+_SKU_SIZE_PAT = re.compile(r'"skus"\s*:\s*(\[[^\]]{0,30000}\])', re.I)
+
 
 class JdMonitor(BaseMonitor):
     platform = "jd"
+
+    def __init__(self, config: dict | None = None):
+        super().__init__(config)
+        self._cache_sku = ""
+        self._cache_variants: list[VariantSnapshot] = []
 
     def fetch(self, pid: str) -> tuple[PricePoint | None, InventorySnapshot | None]:
         price = self._fetch_price(pid)
@@ -82,3 +91,60 @@ class JdMonitor(BaseMonitor):
         except Exception:  # noqa: BLE001
             qty = None
         return InventorySnapshot(ts=self.now(), in_stock=in_stock, state=name, quantity=qty)
+
+    # ---------- 尺码 / SKU 库存 ----------
+    def variants(self, pid: str, max_skus: int = 12) -> list[VariantSnapshot]:
+        """从商品页 colorSize 解析各尺码 sku，再逐个查库存。
+
+        一次最多查 max_skus 个，避免请求过多。
+        """
+        if self._cache_sku == pid and self._cache_variants:
+            return self._cache_variants
+        html = self._item_html(pid)
+        if not html:
+            return []
+        skus = _parse_skus(html)
+        out: list[VariantSnapshot] = []
+        for label, sku in skus[:max_skus]:
+            snap = self._fetch_stock(sku)
+            if snap is None:
+                continue
+            out.append(VariantSnapshot(
+                ts=snap.ts, variant=label, in_stock=snap.in_stock,
+                state=snap.state, quantity=snap.quantity,
+            ))
+        self._cache_sku, self._cache_variants = pid, out
+        return out
+
+    def _item_html(self, pid: str) -> str:
+        url = ITEM_PAGE.format(sku=pid)
+        try:
+            resp = self.http_get(url)
+            if "验证" in resp.text[:2000] or resp.status_code >= 400:
+                return self._maybe_render(url) or ""
+            return resp.text
+        except Exception:  # noqa: BLE001
+            return self._maybe_render(url) or ""
+
+
+def _parse_skus(html: str) -> list[tuple[str, str]]:
+    """解析商品页中的尺码-sku 映射：[(label, skuId)]。"""
+    for pat in (_COLOR_SIZE_PAT, _SKU_SIZE_PAT):
+        for m in pat.finditer(html):
+            raw = m.group(1).replace("'", '"')
+            try:
+                items = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            out: list[tuple[str, str]] = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                sku = it.get("skuId") or it.get("sku_id") or it.get("id")
+                label = (it.get("尺码") or it.get("size") or it.get("sizeName")
+                         or it.get("skuName") or it.get("name"))
+                if sku and label:
+                    out.append((str(label), str(sku)))
+            if out:
+                return out
+    return []

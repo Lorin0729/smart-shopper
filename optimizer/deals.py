@@ -184,10 +184,13 @@ def optimize_cart(items: list[CartItem], rules: list[DiscountRule]) -> dict:
 
     grand_base = sum(final_by_store.values())
 
-    # 跨店满减 + 平台级券作用于总价
+    # 跨店满减 + 平台级券作用于总价：同样走组合枚举，保证互斥组只取最优一张
     global_rules = [r for r in rules if not r.store and r.enabled]
-    grand = _apply_sequence(grand_base, global_rules)
-    grand.original = round(grand_base, 2)
+    if global_rules:
+        grand = best_price(grand_base, global_rules)
+        grand.original = round(grand_base, 2)
+    else:
+        grand = DealResult(original=round(grand_base, 2), final=round(grand_base, 2), applied=[])
 
     total_saved = round(
         sum(res.saved for res in store_results.values()) + grand.saved, 2

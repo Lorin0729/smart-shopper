@@ -6,8 +6,12 @@
 - wecom_webhook       企业微信群机器人
 - telegram_*          Telegram Bot（bot_token + chat_id）
 - webhook_url         通用 JSON Webhook（POST {"title","text","markdown"}）
+- email               邮件（SMTP：email.smtp_host / smtp_port / username / password / to / from）
 """
 from __future__ import annotations
+
+import smtplib
+from email.message import EmailMessage
 
 import requests
 
@@ -23,6 +27,7 @@ class Notifier:
         self.telegram_token = cfg.get("telegram_bot_token", "")
         self.telegram_chat = cfg.get("telegram_chat_id", "")
         self.webhook_url = cfg.get("webhook_url", "")
+        self.email_cfg = cfg.get("email") or {}
 
     def send(self, title: str, lines: list[str]) -> None:
         body = "\n".join(lines)
@@ -48,6 +53,32 @@ class Notifier:
                   {"chat_id": self.telegram_chat, "text": f"{title}\n{body}"})
         if self.webhook_url:
             _json(self.webhook_url, {"title": title, "text": body, "markdown": body})
+        if self.email_cfg:
+            self._send_email(title, body)
+
+    def _send_email(self, title: str, body: str) -> None:
+        c = self.email_cfg
+        host, to_addr = c.get("smtp_host", ""), c.get("to", "")
+        if not host or not to_addr:
+            return
+        msg = EmailMessage()
+        msg["Subject"] = title
+        msg["From"] = c.get("from") or c.get("username", "")
+        msg["To"] = to_addr
+        msg.set_content(body)
+        port = int(c.get("smtp_port", 465))
+        try:
+            if port == 465:
+                server = smtplib.SMTP_SSL(host, port, timeout=TIMEOUT)
+            else:
+                server = smtplib.SMTP(host, port, timeout=TIMEOUT)
+                server.starttls()
+            if c.get("username"):
+                server.login(c["username"], c.get("password", ""))
+            server.send_message(msg)
+            server.quit()
+        except (smtplib.SMTPException, OSError, ValueError):
+            pass  # 通知失败不影响监控主流程
 
 
 def _form(url: str, data: dict) -> None:

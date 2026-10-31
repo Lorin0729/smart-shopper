@@ -17,15 +17,36 @@ class MonitorError(RuntimeError):
 
 
 class BaseMonitor:
-    """子类实现 fetch()：返回 (价格点, 库存快照)，任一可能为 None。"""
+    """子类实现 fetch()：返回 (价格点, 库存快照)，任一可能为 None。
+
+    可选实现 variants()：返回尺码/SKU 级库存（UniqloMonitor / JdMonitor 已支持）。
+    """
 
     platform = "base"
+    render_fallback = True  # 解析失败时是否尝试 Playwright 渲染（需已安装）
 
     def __init__(self, config: dict | None = None):
         self.config = config or {}
 
     def fetch(self, pid: str) -> tuple:
         raise NotImplementedError
+
+    def variants(self, pid: str) -> list:
+        """尺码/SKU 级库存，默认不支持则返回空列表。"""
+        return []
+
+    def _maybe_render(self, url: str, cookie: str = "",
+                      wait_selector: str | None = None) -> str | None:
+        """尝试用 Playwright 渲染页面；未安装或失败返回 None。"""
+        if not self.config.get("playwright_fallback", self.render_fallback):
+            return None
+        try:
+            from . import renderer
+            if not renderer.available():
+                return None
+            return renderer.render_html(url, cookie=cookie, wait_selector=wait_selector)
+        except Exception:  # noqa: BLE001
+            return None
 
     @staticmethod
     def http_get(url: str, **kw) -> requests.Response:

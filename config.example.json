@@ -2,14 +2,22 @@
   "db": "shopper.db",
   "check_interval_seconds": 3600,
   "jd": { "area": "1_72_2799_0", "cat": "", "venderId": "" },
-  "uniqlo": { "api_template": "" },
-  "taobao": { "cookie": "" },
+  "uniqlo": { "api_template": "", "playwright_fallback": true },
+  "taobao": { "cookie": "", "playwright_fallback": true },
   "notify": {
     "serverchan_key": "",
     "dingtalk_webhook": "",
     "wecom_webhook": "",
     "telegram_bot_token": "",
     "telegram_chat_id": "",
-    "webhook_url": ""
+    "webhook_url": "",
+    "email": {
+      "smtp_host": "",
+      "smtp_port": 465,
+      "username": "",
+      "password": "",
+      "from": "",
+      "to": ""
+    }
   }
 }

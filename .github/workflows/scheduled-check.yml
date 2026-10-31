@@ -45,3 +45,17 @@ jobs:
         env:
           SMART_SHOPPER_CONFIG: ${{ secrets.SMART_SHOPPER_CONFIG }}
         run: python main.py check
+
+      - name: Build HTML report
+        if: always()
+        env:
+          SMART_SHOPPER_CONFIG: ${{ secrets.SMART_SHOPPER_CONFIG }}
+        run: python main.py report --out report.html || true
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: price-report
+          path: report.html
+          if-no-files-found: ignore

@@ -22,6 +22,7 @@ class Product:
     category: str = "general"  # 见 predictor/season.py 的类目档案
     launch_date: str | None = None  # 发售/上架日 ISO，如 2026-09-15
     target_price: float | None = None  # 目标价：价格降到该值即提醒
+    watched_variant: str = ""  # 关注的尺码/规格（如 M / 42），补货时单独提醒
     added_at: float = field(default_factory=time.time)
 
     def display_id(self) -> str:
@@ -53,3 +54,18 @@ class InventorySnapshot:
     in_stock: bool
     state: str = ""  # 现货 / 无货 / 补货中 / 紧张 ...
     quantity: int | None = None  # 若平台能给出具体数量
+
+
+@dataclass
+class VariantSnapshot:
+    """尺码/SKU 级库存采样。"""
+
+    ts: float
+    variant: str  # 如 "M"、"XL"、"42"
+    in_stock: bool
+    state: str = ""
+    quantity: int | None = None
+
+    @property
+    def label(self) -> str:
+        return self.state or ("有货" if self.in_stock else "无货")

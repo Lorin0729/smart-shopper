@@ -5,7 +5,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .models import InventorySnapshot, PricePoint, Product
+from .models import (InventorySnapshot, PricePoint, Product, VariantSnapshot)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS products (
@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS products (
     category   TEXT DEFAULT 'general',
     launch_date TEXT,
     target_price REAL,
+    watched_variant TEXT DEFAULT '',
     added_at   REAL
 );
 CREATE TABLE IF NOT EXISTS prices (
@@ -34,6 +35,15 @@ CREATE TABLE IF NOT EXISTS inventories (
     quantity   INTEGER,
     PRIMARY KEY (display_id, ts)
 );
+CREATE TABLE IF NOT EXISTS variants (
+    display_id TEXT NOT NULL,
+    variant    TEXT NOT NULL,
+    ts         REAL NOT NULL,
+    in_stock   INTEGER NOT NULL,
+    state      TEXT DEFAULT '',
+    quantity   INTEGER,
+    PRIMARY KEY (display_id, variant, ts)
+);
 """
 
 
@@ -47,19 +57,24 @@ class Store:
         self.conn.commit()
 
     def _migrate(self) -> None:
-        """旧库升级：缺列则补。"""
+        """旧库升级：缺列/缺表则补。"""
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(products)")}
         if "target_price" not in cols:
             self.conn.execute("ALTER TABLE products ADD COLUMN target_price REAL")
+        if "watched_variant" not in cols:
+            self.conn.execute(
+                "ALTER TABLE products ADD COLUMN watched_variant TEXT DEFAULT ''"
+            )
 
     # ---------- 商品 ----------
     def add_product(self, p: Product) -> bool:
         """新增商品，已存在则返回 False。"""
         try:
             self.conn.execute(
-                "INSERT INTO products VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO products VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (p.display_id(), p.platform, p.pid, p.url, p.name,
-                 p.category, p.launch_date, p.target_price, p.added_at),
+                 p.category, p.launch_date, p.target_price,
+                 p.watched_variant, p.added_at),
             )
             self.conn.commit()
             return True
@@ -68,8 +83,10 @@ class Store:
 
     def update_product(self, p: Product) -> None:
         self.conn.execute(
-            "UPDATE products SET name=?, category=?, launch_date=?, target_price=? WHERE display_id=?",
-            (p.name, p.category, p.launch_date, p.target_price, p.display_id()),
+            "UPDATE products SET name=?, category=?, launch_date=?, target_price=?, "
+            "watched_variant=? WHERE display_id=?",
+            (p.name, p.category, p.launch_date, p.target_price,
+             p.watched_variant, p.display_id()),
         )
         self.conn.commit()
 
@@ -97,6 +114,7 @@ class Store:
             self.conn.execute("DELETE FROM products WHERE display_id=?", (did,))
             self.conn.execute("DELETE FROM prices WHERE display_id=?", (did,))
             self.conn.execute("DELETE FROM inventories WHERE display_id=?", (did,))
+            self.conn.execute("DELETE FROM variants WHERE display_id=?", (did,))
         return True
 
     @staticmethod
@@ -104,7 +122,8 @@ class Store:
         return Product(
             platform=r["platform"], pid=r["pid"], url=r["url"], name=r["name"],
             category=r["category"], launch_date=r["launch_date"],
-            target_price=r["target_price"], added_at=r["added_at"],
+            target_price=r["target_price"],
+            watched_variant=r["watched_variant"] or "", added_at=r["added_at"],
         )
 
     # ---------- 价格 ----------
@@ -146,6 +165,45 @@ class Store:
             return None
         return InventorySnapshot(row["ts"], bool(row["in_stock"]), row["state"], row["quantity"])
 
+    # ---------- 尺码 / SKU 变体 ----------
+    def add_variant(self, display_id: str, snap: VariantSnapshot) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO variants VALUES (?,?,?,?,?,?)",
+            (display_id, snap.variant, snap.ts, int(snap.in_stock), snap.state, snap.quantity),
+        )
+        self.conn.commit()
+
+    def add_variants(self, display_id: str, snaps: list[VariantSnapshot]) -> None:
+        with self.conn:
+            for s in snaps:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO variants VALUES (?,?,?,?,?,?)",
+                    (display_id, s.variant, s.ts, int(s.in_stock), s.state, s.quantity),
+                )
+
+    def latest_variants(self, display_id: str) -> list[VariantSnapshot]:
+        """每个变体取最新一次采样。"""
+        rows = self.conn.execute(
+            "SELECT v.* FROM variants v JOIN ("
+            "  SELECT variant, MAX(ts) AS mts FROM variants WHERE display_id=? GROUP BY variant"
+            ") t ON v.variant=t.variant AND v.ts=t.mts WHERE v.display_id=? ORDER BY v.variant",
+            (display_id, display_id),
+        ).fetchall()
+        return [
+            VariantSnapshot(r["ts"], r["variant"], bool(r["in_stock"]), r["state"], r["quantity"])
+            for r in rows
+        ]
+
+    def last_variant(self, display_id: str, variant: str) -> VariantSnapshot | None:
+        row = self.conn.execute(
+            "SELECT * FROM variants WHERE display_id=? AND variant=? ORDER BY ts DESC LIMIT 1",
+            (display_id, variant),
+        ).fetchone()
+        if not row:
+            return None
+        return VariantSnapshot(row["ts"], row["variant"], bool(row["in_stock"]),
+                               row["state"], row["quantity"])
+
     # ---------- 统计 ----------
     def summary(self) -> dict:
         prods = self.list_products()
@@ -153,6 +211,7 @@ class Store:
             "products": len(prods),
             "price_points": self.conn.execute("SELECT COUNT(*) c FROM prices").fetchone()["c"],
             "inventory_points": self.conn.execute("SELECT COUNT(*) c FROM inventories").fetchone()["c"],
+            "variant_points": self.conn.execute("SELECT COUNT(*) c FROM variants").fetchone()["c"],
         }
 
 

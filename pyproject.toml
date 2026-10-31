@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-shopper"
+version = "0.3.0"
+description = "优衣库/京东/淘宝降价监控 + 优惠叠加最优解 + 购买时机与降价预测"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["price-tracker", "coupon", "uniqlo", "jd", "taobao", "shopping"]
+dependencies = ["requests>=2.28"]
+
+[project.optional-dependencies]
+chart = ["matplotlib>=3.6"]
+render = ["playwright>=1.40"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+smart-shopper = "main:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "monitors*", "optimizer*", "predictor*", "notifier*", "datasource*"]
