@@ -13,6 +13,10 @@
   deal     单品叠券最优解（TOP3 方案）
   cart     购物车跨店凑单优化（JSON）
   bundle   多商品组合购买：怎么凑单最划算
+  sizes    查看/刷新尺码库存
+  serve    启动本地只读 Web 面板
+  export / import-list  备份与分享购物清单
+  test-notify 通知渠道自检
   init     生成配置文件
   demo     离线演示全部分析链路
 
@@ -34,7 +38,8 @@ import time
 from datetime import date, datetime
 from pathlib import Path
 
-from core.models import InventorySnapshot, PLATFORMS, Product, VariantSnapshot
+from core.models import (InventorySnapshot, PLATFORM_GENERIC, PLATFORMS, PricePoint,
+                         Product, VariantSnapshot)
 from core import report as core_report
 from core import sparkline as core_sparkline
 from core.storage import Store
@@ -45,6 +50,7 @@ from optimizer.bundle import plan_bundle
 from optimizer.deals import CartItem, DiscountRule, best_deal, demo_rules, optimize_cart
 from predictor import season
 from predictor.forecast import PriceHistory, predict_drop, recommend
+from webui.dashboard import serve as serve_dashboard
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = {
@@ -85,7 +91,13 @@ def fmt_ts(ts: float) -> str:
 
 # ------------------------------------------------------------------ 子命令
 def cmd_add(args, store: Store, cfg: dict) -> int:
-    platform, pid = parse_product_url(args.url)
+    if args.platform == PLATFORM_GENERIC:
+        platform, pid = PLATFORM_GENERIC, args.url
+    elif args.platform:
+        _, pid = parse_product_url(args.url)
+        platform = args.platform
+    else:
+        platform, pid = parse_product_url(args.url)
     p = Product(platform=platform, pid=pid, url=args.url,
                 name=args.name or "", category=season.normalize_category(args.category or "general"),
                 launch_date=args.launch, target_price=args.target,
@@ -100,6 +112,9 @@ def cmd_add(args, store: Store, cfg: dict) -> int:
         extras.append(f"关注尺码 {args.size}")
     tip = "，" + "，".join(extras) if extras else ""
     print(f"已添加跟踪：{p.display_id()}{tip}")
+    if platform == PLATFORM_GENERIC:
+        print("提示：通用站点需要在 config.json 的 generic.sites 里为 "
+              "该域名配置 price_regex / stock_regex，详见 README「通用站点监控」。")
     print("提示：执行 `python main.py check` 立即抓取一次价格与库存。")
     return 0
 
@@ -158,13 +173,49 @@ def cmd_rm(args, store: Store, cfg: dict) -> int:
     return 0 if ok else 1
 
 
+# 各类提醒的默认冷却时长（小时）；0 表示每次都提醒
+DEFAULT_ALERT_COOLDOWN = {
+    "drop": 12,      # 降价
+    "low": 24,       # 历史新低
+    "target": 0,     # 目标价（本身只在穿越时触发）
+    "restock": 6,    # 补货
+    "variant": 6,    # 尺码补货
+    "stockout": 12,  # 变为无货
+}
+
+
+def _cooldowns(cfg: dict) -> dict:
+    out = dict(DEFAULT_ALERT_COOLDOWN)
+    custom = cfg.get("alert_cooldown_hours")
+    if isinstance(custom, (int, float)):
+        out = {k: float(custom) for k in out}
+    elif isinstance(custom, dict):
+        out.update({k: float(v) for k, v in custom.items() if isinstance(v, (int, float))})
+    return out
+
+
+def _alert_allowed(store: Store, did: str, kind: str, cooldowns: dict, now_ts: float) -> bool:
+    hours = cooldowns.get(kind, 12)
+    if hours <= 0:
+        return True
+    last = store.last_alert(did, kind)
+    return last is None or now_ts - last >= hours * 3600
+
+
 def check_cycle(store: Store, cfg: dict, notifier: Notifier) -> None:
     """抓取所有跟踪商品一轮，记录价格/库存并发出降价、补货提醒。"""
     prods = store.list_products()
     if not prods:
         print("暂无跟踪商品。")
         return
-    alerts: list[str] = []
+    cooldowns = _cooldowns(cfg)
+    alerts: list[tuple[str, str, str]] = []  # (kind, display_id, 文案)
+
+    def add_alert(kind: str, did: str, text: str) -> None:
+        if _alert_allowed(store, did, kind, cooldowns, time.time()):
+            alerts.append((kind, did, text))
+            store.mark_alert(did, kind)
+
     for p in prods:
         try:
             monitor = get_monitor(p.platform, cfg)
@@ -184,31 +235,34 @@ def check_cycle(store: Store, cfg: dict, notifier: Notifier) -> None:
             print(line)
             if prev and point.price < prev.price - 0.01:
                 pct = (prev.price - point.price) / prev.price * 100
-                alerts.append(f"[降价] {p.name or did}: ¥{prev.price:g} → ¥{point.price:g}（-{pct:.1f}%）")
+                add_alert("drop", did,
+                          f"[降价] {p.name or did}: ¥{prev.price:g} → ¥{point.price:g}（-{pct:.1f}%）")
                 low = store.lowest_price(did)
                 if low and point.price <= low.price + 0.01:
-                    alerts.append(f"[新低] {p.name or did} 刷新历史最低 ¥{point.price:g}")
+                    add_alert("low", did, f"[新低] {p.name or did} 刷新历史最低 ¥{point.price:g}")
             # 目标价只在「穿越」时提醒一次，避免每轮重复轰炸
             if p.target_price and point.price <= p.target_price:
                 crossed = prev is None or prev.price > p.target_price
                 if crossed:
-                    alerts.append(
-                        f"[达标] {p.name or did} 当前 ¥{point.price:g} 已达到目标价 ¥{p.target_price:g}"
-                    )
+                    add_alert("target", did,
+                              f"[达标] {p.name or did} 当前 ¥{point.price:g} 已达到目标价 ¥{p.target_price:g}")
             if getattr(monitor, "last_name", "") and not p.name:
                 p.name = monitor.last_name
                 store.update_product(p)
         if inv:
             store.add_inventory(did, inv)
             if prev_inv and not prev_inv.in_stock and inv.in_stock:
-                alerts.append(f"[补货] {p.name or did} 已补货（{inv.state}）")
+                add_alert("restock", did, f"[补货] {p.name or did} 已补货（{inv.state}）")
             if prev_inv and prev_inv.in_stock and not inv.in_stock:
-                print(f"[提示] {did} 变为无货")
+                add_alert("stockout", did, f"[无货] {p.name or did} 变为无货")
 
-        # 尺码/SKU 级库存（优衣库、京东支持）
-        alerts += _check_variants(store, monitor, p)
+        # 尺码/SKU 级库存（优衣库、京东、通用站点支持）
+        for text in _check_variants(store, monitor, p):
+            add_alert("variant", did, text)
+
     if alerts:
-        notifier.send("Smart Shopper 价格提醒", alerts)
+        notifier.send("Smart Shopper 价格提醒", [text for _k, _d, text in alerts])
+        print(f"已发送 {len(alerts)} 条提醒（冷却期见 config.alert_cooldown_hours）")
 
 
 def _check_variants(store: Store, monitor, p: Product) -> list[str]:
@@ -449,8 +503,9 @@ def cmd_init(args, store: Store, cfg: dict) -> int:
     print("下一步：")
     print("  1. 按需编辑 config.json（淘宝 Cookie、京东区域码、通知渠道、SMTP 邮件）")
     print("  2. python main.py add <商品链接> --target 500 --size M  # 目标价/关注尺码可选")
-    print("  3. python main.py check --watch                       # 持续监控")
-    print("  4. python main.py report                              # 生成 HTML 报告")
+    print("  3. python main.py test-notify                        # 通知自检")
+    print("  4. python main.py check --watch                      # 持续监控")
+    print("  5. python main.py report / serve                     # HTML 报告 / 本地面板")
     print("  云端免费监控见 README「部署到 GitHub Actions」章节。")
     return 0
 
@@ -607,6 +662,151 @@ def cmd_bundle(args, store: Store, cfg: dict) -> int:
     return 0
 
 
+def cmd_sizes(args, store: Store, cfg: dict) -> int:
+    """查看/刷新尺码库存。"""
+    p = resolve_product(store, args.key)
+    if not p:
+        print(f"未找到商品：{args.key}")
+        return 1
+    if args.refresh:
+        try:
+            monitor = get_monitor(p.platform, cfg)
+            variants = monitor.variants(p.pid)
+        except Exception as e:  # noqa: BLE001
+            print(f"抓取尺码库存失败：{e}")
+            return 1
+        if variants:
+            store.add_variants(p.display_id(), variants)
+            print(f"已刷新 {len(variants)} 个尺码库存。")
+        else:
+            print("该商品/平台暂不支持尺码级库存（优衣库、京东、部分通用站点可用）。")
+    variants = store.latest_variants(p.display_id())
+    if not variants:
+        print("暂无尺码库存数据（先 check 或加 --refresh）。")
+        return 1
+    print(f"{p.name or p.display_id()} 尺码库存（关注：{p.watched_variant or '未设置'}）")
+    for v in variants:
+        mark = "  ← 关注" if p.watched_variant and v.variant == p.watched_variant else ""
+        qty = f"（剩 {v.quantity} 件）" if v.quantity is not None else ""
+        print(f"  {v.variant:<6} {v.label}{qty}  {fmt_ts(v.ts)}{mark}")
+    return 0
+
+
+def cmd_test_notify(args, store: Store, cfg: dict) -> int:
+    notifier = Notifier(cfg.get("notify"))
+    enabled = []
+    if notifier.serverchan_key:
+        enabled.append("Server酱")
+    if notifier.dingtalk_webhook:
+        enabled.append("钉钉")
+    if notifier.wecom_webhook:
+        enabled.append("企业微信")
+    if notifier.telegram_token and notifier.telegram_chat:
+        enabled.append("Telegram")
+    if notifier.webhook_url:
+        enabled.append("Webhook")
+    if notifier.email_cfg.get("smtp_host") and notifier.email_cfg.get("to"):
+        enabled.append("邮件")
+    if not enabled:
+        print("尚未配置任何通知渠道。请在 config.json 的 notify 中至少填写一项，")
+        print("例如 serverchan_key 或 dingtalk_webhook，详见 README。")
+        return 1
+    print("已配置渠道：" + "、".join(enabled) + "，正在发送测试消息…")
+    notifier.send("Smart Shopper 通知测试",
+                  ["如果你收到这条消息，说明通知渠道配置成功。",
+                   f"当前共跟踪 {len(store.list_products())} 件商品。"])
+    print("完成。若某个渠道没收到，请检查密钥/Webhook 与网络。")
+    return 0
+
+
+def cmd_export(args, store: Store, cfg: dict) -> int:
+    """导出购物清单（可分享给家人，也可作为备份）。"""
+    prods = store.list_products()
+    if not prods:
+        print("暂无跟踪商品可导出。")
+        return 1
+    data = {
+        "version": 1,
+        "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "products": [{
+            "platform": p.platform, "pid": p.pid, "url": p.url, "name": p.name,
+            "category": p.category, "launch_date": p.launch_date,
+            "target_price": p.target_price, "watched_variant": p.watched_variant,
+        } for p in prods],
+    }
+    if args.with_prices:
+        data["prices"] = {
+            p.display_id(): [[pt.ts, pt.price, pt.original_price]
+                             for pt in store.get_prices(p.display_id())]
+            for p in prods
+        }
+    out = Path(args.out or "wishlist.json")
+    out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"已导出 {len(prods)} 件商品到 {out}"
+          + ("（含价格历史）" if args.with_prices else "（不含价格历史，可加 --with-prices）"))
+    return 0
+
+
+def cmd_import(args, store: Store, cfg: dict) -> int:
+    """导入购物清单（与本地合并）。"""
+    path = Path(args.file)
+    if not path.exists():
+        print(f"文件不存在：{path}")
+        return 1
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        print(f"JSON 解析失败：{e}")
+        return 1
+    items = data.get("products") if isinstance(data, dict) else data
+    if not isinstance(items, list) or not items:
+        print("文件里没有商品列表（products）。")
+        return 1
+    added, updated, skipped = 0, 0, 0
+    for it in items:
+        try:
+            p = Product(
+                platform=it["platform"], pid=it["pid"], url=it["url"],
+                name=it.get("name") or "", 
+                category=season.normalize_category(it.get("category") or "general"),
+                launch_date=it.get("launch_date"), target_price=it.get("target_price"),
+                watched_variant=it.get("watched_variant") or "",
+            )
+        except KeyError:
+            skipped += 1
+            continue
+        if store.add_product(p):
+            added += 1
+        elif args.overwrite:
+            store.update_product(p)
+            updated += 1
+        else:
+            skipped += 1
+    # 价格历史合并
+    price_rows = data.get("prices") if isinstance(data, dict) else None
+    restored = 0
+    if isinstance(price_rows, dict):
+        for did, rows in price_rows.items():
+            for row in rows:
+                try:
+                    ts, price = float(row[0]), float(row[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                orig = row[2] if len(row) > 2 and row[2] is not None else None
+                store.add_price(did, PricePoint(ts=ts, price=price, original_price=orig))
+                restored += 1
+    print(f"导入完成：新增 {added}，覆盖 {updated}，跳过 {skipped}"
+          + (f"，恢复价格记录 {restored} 条" if restored else ""))
+    if skipped and not args.overwrite:
+        print("提示：已存在的商品默认跳过；需要覆盖字段请加 --overwrite。")
+    return 0
+
+
+def cmd_serve(args, store: Store, cfg: dict) -> int:
+    serve_dashboard(store, host=args.host, port=args.port)
+    return 0
+
+
 # ------------------------------------------------------------------ 入口
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="smart-shopper", description=__doc__,
@@ -622,6 +822,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--launch", help="发售日，如 2026-09-15")
     p.add_argument("--target", type=float, help="目标价：降到该价即提醒")
     p.add_argument("--size", help="关注尺码/规格，如 M / 42（补货时单独提醒）")
+    p.add_argument("--platform", choices=list(PLATFORMS) + [PLATFORM_GENERIC],
+                   help="强制指定平台；generic 表示用 config.generic.sites 的正则解析")
     p.set_defaults(fn=cmd_add)
 
     p = sub.add_parser("edit", help="修改已跟踪商品的名称/类目/目标价/尺码")
@@ -698,6 +900,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--filler-max", type=float, default=150.0,
                    help="可接受的凑单金额上限（默认 150）")
     p.set_defaults(fn=cmd_bundle)
+
+    p = sub.add_parser("sizes", help="查看/刷新尺码库存")
+    p.add_argument("key", help="序号 / platform:pid / URL")
+    p.add_argument("--refresh", action="store_true", help="先联网刷新一次")
+    p.set_defaults(fn=cmd_sizes)
+
+    p = sub.add_parser("serve", help="启动本地只读 Web 面板")
+    p.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机）")
+    p.add_argument("--port", type=int, default=8777, help="端口（默认 8777）")
+    p.set_defaults(fn=cmd_serve)
+
+    p = sub.add_parser("export", help="导出购物清单（备份 / 分享给家人）")
+    p.add_argument("--out", default="wishlist.json", help="输出文件（默认 wishlist.json）")
+    p.add_argument("--with-prices", action="store_true", help="同时导出价格历史")
+    p.set_defaults(fn=cmd_export)
+
+    p = sub.add_parser("import-list", help="导入购物清单并与本地合并")
+    p.add_argument("file", help="export 生成的 JSON 文件")
+    p.add_argument("--overwrite", action="store_true", help="覆盖本地已有商品的字段")
+    p.set_defaults(fn=cmd_import)
+
+    p = sub.add_parser("test-notify", help="发送一条测试通知，检查渠道配置")
+    p.set_defaults(fn=cmd_test_notify)
     return ap
 
 

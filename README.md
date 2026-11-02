@@ -5,10 +5,18 @@
 **监控与预警**
 
 - 优衣库 / 京东 / 淘宝·天猫 价格与库存定时抓取，降价、历史新低、补货即时推送
+- **通用站点监控**：拼多多、唯品会、天猫超市、品牌官网……一条正则即可接入
 - 目标价提醒：`--target 500`，只在价格「穿越」目标价时提醒一次，不重复轰炸
 - 尺码/SKU 级库存：`--size M`，只关心你穿的码，M 码补货单独通知
-- 多渠道通知：Server酱（微信）/ 钉钉 / 企业微信 / Telegram / 邮件 SMTP / 通用 Webhook
+- **提醒冷却期**：按类型分别设置（降价 12h / 新低 24h / 补货 6h），避免反复轰炸
+- 多渠道通知：Server酱（微信）/ 钉钉 / 企业微信 / Telegram / 邮件 SMTP / 通用 Webhook，`test-notify` 一键自检
 - 云端免费监控：GitHub Actions 定时跑，产物 HTML 报告自动上传为 Artifact
+
+**查看与分享**
+
+- 终端报告、`report` 自包含 HTML 报告、`chart` SVG/PNG 图表
+- **本地 Web 面板**：`serve` 启动零依赖只读面板，支持搜索、排序、价格曲线、尺码库存
+- **清单备份与家庭共享**：`export` / `import-list`，可带价格历史，随时迁移或分享
 
 **省钱计算**
 
@@ -69,6 +77,7 @@ python main.py analyze 1                      # 终端详细分析
 python main.py report --out report.html       # HTML 报告（可分享）
 python main.py chart 1 --format png           # 走势图：svg/html/png
 python main.py history 1 --days 30 --csv price_log.csv
+python main.py serve                          # 本地 Web 面板 http://127.0.0.1:8777
 
 # 6. 省钱计算
 python main.py deal --price 899 --platform jd           # 单品叠券 TOP3
@@ -76,8 +85,12 @@ python main.py cart cart.json                           # 购物车跨店凑单
 python main.py bundle --filler-max 150                  # 已跟踪商品组合购买
 python main.py bundle --file bundle.json                # 自定义组合
 
-# 7. 维护
+# 7. 维护与分享
 python main.py edit 1 --target 450 --size L             # 改目标价/尺码
+python main.py sizes 1 --refresh                        # 刷新尺码库存
+python main.py export --with-prices                     # 导出清单（含价格历史）
+python main.py import-list wishlist.json --overwrite    # 导入并合并
+python main.py test-notify                              # 通知渠道自检
 python main.py rm 1
 ```
 
@@ -137,16 +150,34 @@ python main.py rm 1
 · 再凑 ¥121.00 可多触发一档，多减 ¥50（净亏 ¥71.00，不建议硬凑）
 ```
 
+## 本地 Web 面板
+
+```bash
+python main.py serve                 # 默认 http://127.0.0.1:8777
+python main.py serve --port 9000     # 自定义端口
+```
+
+零第三方依赖（标准库 HTTP 服务），只读、不会触发抓取：
+
+- 卡片式列表，支持按决策分 / 距历史低价 / 当前价 / 降价概率排序
+- 关键词搜索（商品名、类目、平台）
+- 每个商品一条 SVG 价格曲线（含目标价虚线与最低点标注）
+- 展示尺码库存、30 天降价概率、购买窗口与建议理由
+
+接口：`GET /api/summary`（全部商品 JSON）、`GET /api/product/<id>`、`GET /api/health`。
+默认只监听 `127.0.0.1`，不会暴露到局域网。
+
 ## 目录结构
 
 ```
 smart-shopper/
 ├── main.py                # CLI：add/edit/list/rm/check/analyze/history/seed/
-│                          #      chart/report/deal/cart/bundle/init/demo
+│                          #      chart/report/deal/cart/bundle/sizes/serve/
+│                          #      export/import-list/test-notify/init/demo
 ├── pyproject.toml         # 可 pip 安装（console script: smart-shopper）
 ├── core/
 │   ├── models.py          # Product / PricePoint / InventorySnapshot / VariantSnapshot
-│   ├── storage.py         # SQLite（商品/价格/库存/尺码，自动迁移旧库）
+│   ├── storage.py         # SQLite（商品/价格/库存/尺码/提醒冷却，自动迁移旧库）
 │   ├── sparkline.py       # 终端价格走势图
 │   └── report.py          # SVG 走势图 + 自包含 HTML 报告 + PNG（可选）
 ├── datasource/            # 第三方历史价（慢慢买）+ CSV 导入
@@ -154,6 +185,7 @@ smart-shopper/
 │   ├── uniqlo.py          # 优衣库：价格/库存/尺码，接口可配置
 │   ├── jd.py              # 京东：p.3.cn 价格 + c0.3.cn 库存 + SKU 尺码
 │   ├── taobao.py          # 淘宝/天猫：自备 Cookie（实验性）
+│   ├── generic.py         # 通用站点：配置正则即可接入任意电商页
 │   └── renderer.py        # Playwright 渲染兜底（可选依赖）
 ├── optimizer/
 │   ├── deals.py           # 叠券穷举引擎
@@ -161,11 +193,12 @@ smart-shopper/
 ├── predictor/
 │   ├── forecast.py        # 历史统计、大促日历、降价概率、购买建议
 │   └── season.py          # 季节类目模型
+├── webui/dashboard.py     # 本地只读 Web 面板（标准库）
 ├── notifier/              # Server酱/钉钉/企微/Telegram/邮件/Webhook
 ├── .github/workflows/
 │   ├── ci.yml             # 三版本 Python 跑测试
 │   └── scheduled-check.yml# 云端定时监控 + 报告 Artifact
-└── tests/                 # 38 个单元测试
+└── tests/                 # 53 个单元测试
 ```
 
 ## 配置
@@ -176,9 +209,20 @@ smart-shopper/
 {
   "db": "shopper.db",
   "check_interval_seconds": 3600,
+  "alert_cooldown_hours": { "drop": 12, "low": 24, "target": 0, "restock": 6, "variant": 6 },
   "jd": { "area": "1_72_2799_0" },
   "uniqlo": { "api_template": "", "playwright_fallback": true },
   "taobao": { "cookie": "", "playwright_fallback": true },
+  "generic": {
+    "sites": {
+      "example.com": {
+        "price_regex": "\"price\"\\s*:\\s*\"?([0-9.]+)",
+        "stock_regex": "有货|立即购买",
+        "stockout_regex": "售罄|已抢光",
+        "name_regex": "<title>(.+?)</title>"
+      }
+    }
+  },
   "notify": {
     "serverchan_key": "",
     "dingtalk_webhook": "",
@@ -195,9 +239,75 @@ smart-shopper/
 ```
 
 - `jd.area`：库存查询收货区域码（`1_72_2799_0` 为北京），不同区域库存不同
+- `alert_cooldown_hours`：同类提醒的冷却小时数，可只填想改的项；填 `0` 表示每次都提醒
 - `notify.*`：多渠道可同时启用；邮件用 SMTP，465 端口走 SSL，587 走 STARTTLS
 - `playwright_fallback`：解析失败时是否用浏览器渲染兜底（需先安装 playwright）
 - 配置也可用环境变量 `SMART_SHOPPER_CONFIG`（JSON 字符串）注入，优先级高于文件——GitHub Actions 就是这样读 Secrets 的
+
+## 通用站点监控（拼多多 / 唯品会 / 天猫超市 / 任意站点）
+
+没有专门适配的平台，用 `--platform generic` + 配置正则即可：
+
+```bash
+python main.py add "https://mobile.yangkeduo.com/goods.html?goods_id=123" \
+  --platform generic --name 拼多多羽绒服 --category 羽绒服 --target 299
+```
+
+然后在 `config.json` 的 `generic.sites` 里按域名后缀配置（`*` 为兜底规则）：
+
+```json
+{
+  "generic": {
+    "sites": {
+      "mobile.yangkeduo.com": {
+        "price_regex": "\"minPrice\"\\s*:\\s*([0-9.]+)",
+        "stock_regex": "立即购买|加入购物车",
+        "stockout_regex": "已售罄|已抢光",
+        "name_regex": "<title>(.+?)</title>",
+        "cookie": "",
+        "playwright": true,
+        "encoding": "utf-8"
+      }
+    }
+  }
+}
+```
+
+- `price_regex` 取第 1 个捕获组（无捕获组则取整个匹配），支持 `¥1,299.00` 这类带符号/逗号的写法
+- `stock_regex` 命中视为有货，`stockout_regex` 命中视为无货；都没命中则库存记为未知
+- `playwright: true`：该站点请求后用浏览器渲染再解析（应对前端渲染或风控）
+- 查找价格的正则可先用浏览器「查看源代码」或 `curl` 得到 HTML，再定位价格字段
+
+## 提醒冷却与去重
+
+降价的细节抖动很容易造成重复提醒，本项目对每类提醒按商品单独记录时间戳：
+
+| 类型 | 默认冷却 | 说明 |
+|---|---|---|
+| `drop` 降价 | 12 小时 | 同一商品 12 小时内只提醒一次降价 |
+| `low` 历史新低 | 24 小时 | 反复触及最低价不会重复推送 |
+| `target` 目标价 | 0（仅穿越时） | 从高于目标价跌到目标价才提醒，之后不重复 |
+| `restock` 补货 | 6 小时 | 商品整体补货 |
+| `variant` 尺码补货 | 6 小时 | 关注尺码补货 |
+
+改冷却时长只需调整 `config.alert_cooldown_hours`，例如全部改成 3 小时：
+
+```json
+{ "alert_cooldown_hours": 3 }
+```
+
+## 备份与家庭共享
+
+```bash
+python main.py export --out wishlist.json               # 只导出商品清单与目标价
+python main.py export --with-prices --out backup.json   # 连同价格历史一起备份
+
+# 在另一台电脑 / 家人设备上
+python main.py import-list wishlist.json                # 合并：已存在则跳过
+python main.py import-list wishlist.json --overwrite    # 覆盖本地字段
+```
+
+导入会保留各自的本地价格历史，并按时间戳合并去重，适合“我挑好清单，家人按同样目标价一起盯”。
 
 ## 部署到 GitHub Actions（免费云端监控）
 
@@ -234,15 +344,20 @@ smart-shopper/
 python -m unittest discover -s tests -v
 ```
 
-覆盖：叠券数学、组合凑单、季节窗口、降价预测与建议、走势图/报告渲染、CSV 导入、SQLite 迁移与尺码存储。
+53 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出。
 
 ## Roadmap
 
-- [ ] 拼多多 / 唯品会 / 天猫超市 价格源
-- [ ] 尺码换算助手（优衣库/JD 尺码表对照）
-- [ ] 价格提醒的「冷却期」可视化配置（按商品自定义提醒频率）
-- [ ] Web UI（本地起一个只读面板）
-- [ ] 多用户/家庭共享购物清单
+- [x] 通用站点价格源（拼多多 / 唯品会 / 天猫超市 / 任意站点正则接入）
+- [x] 尺码/SKU 级库存与关注尺码补货提醒
+- [x] 价格提醒冷却期与去重
+- [x] 本地只读 Web 面板
+- [x] 购物清单导出/导入（家庭共享与备份）
+- [ ] 尺码换算助手（优衣库/JD/欧码对照）
+- [ ] 移动端推送渠道（Bark / ntfy / PushDeer）
+- [ ] 预测模型升级（趋势回归 + 置信区间）
+- [ ] 多币种与海外站点（汇率换算）
+- [ ] 监控健康度指标（连续抓取失败告警）
 
 ## 免责声明
 

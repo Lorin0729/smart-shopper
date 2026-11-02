@@ -4,15 +4,17 @@ from __future__ import annotations
 import re
 from urllib.parse import parse_qs, urlparse
 
-from core.models import PLATFORM_JD, PLATFORM_TAOBAO, PLATFORM_UNIQLO
+from core.models import (PLATFORM_GENERIC, PLATFORM_JD, PLATFORM_TAOBAO,
+                         PLATFORM_UNIQLO)
 
 from .base import BaseMonitor, MonitorError
+from .generic import GenericMonitor
 from .jd import JdMonitor
 from .taobao import TaobaoMonitor
 from .uniqlo import UniqloMonitor
 
 __all__ = [
-    "BaseMonitor", "MonitorError", "JdMonitor", "TaobaoMonitor",
+    "BaseMonitor", "MonitorError", "GenericMonitor", "JdMonitor", "TaobaoMonitor",
     "UniqloMonitor", "parse_product_url", "get_monitor",
 ]
 
@@ -62,4 +64,6 @@ def get_monitor(platform: str, config: dict | None = None) -> BaseMonitor:
         return JdMonitor(config.get("jd") or {})
     if platform == PLATFORM_TAOBAO:
         return TaobaoMonitor(config.get("taobao") or {})
+    if platform == PLATFORM_GENERIC:
+        return GenericMonitor(config.get("generic") or {})
     raise MonitorError(f"未知平台：{platform}")

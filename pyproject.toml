@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-shopper"
-version = "0.3.0"
+version = "0.4.0"
 description = "优衣库/京东/淘宝降价监控 + 优惠叠加最优解 + 购买时机与降价预测"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,4 +24,5 @@ smart-shopper = "main:main"
 py-modules = ["main"]
 
 [tool.setuptools.packages.find]
-include = ["core*", "monitors*", "optimizer*", "predictor*", "notifier*", "datasource*"]
+include = ["core*", "monitors*", "optimizer*", "predictor*", "notifier*",
+          "datasource*", "webui*"]

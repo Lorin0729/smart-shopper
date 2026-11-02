@@ -17,6 +17,8 @@ chart_*.svg
 chart_*.png
 chart_*.html
 price_log.csv
+wishlist.json
+backup.json
 
 # IDE / 系统
 .idea/

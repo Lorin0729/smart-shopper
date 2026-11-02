@@ -1,9 +1,30 @@
 {
   "db": "shopper.db",
   "check_interval_seconds": 3600,
+  "alert_cooldown_hours": {
+    "drop": 12,
+    "low": 24,
+    "target": 0,
+    "restock": 6,
+    "variant": 6,
+    "stockout": 12
+  },
   "jd": { "area": "1_72_2799_0", "cat": "", "venderId": "" },
   "uniqlo": { "api_template": "", "playwright_fallback": true },
   "taobao": { "cookie": "", "playwright_fallback": true },
+  "generic": {
+    "sites": {
+      "example.com": {
+        "price_regex": "\"price\"\\s*:\\s*\"?([0-9.]+)",
+        "stock_regex": "有货|立即购买",
+        "stockout_regex": "售罄|已抢光",
+        "name_regex": "<title>(.+?)</title>",
+        "cookie": "",
+        "encoding": "utf-8",
+        "playwright": false
+      }
+    }
+  },
   "notify": {
     "serverchan_key": "",
     "dingtalk_webhook": "",

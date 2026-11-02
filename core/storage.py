@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS variants (
     quantity   INTEGER,
     PRIMARY KEY (display_id, variant, ts)
 );
+CREATE TABLE IF NOT EXISTS alert_log (
+    display_id TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    ts         REAL NOT NULL,
+    PRIMARY KEY (display_id, kind)
+);
 """
 
 
@@ -55,6 +61,9 @@ class Store:
         self.conn.executescript(_SCHEMA)
         self._migrate()
         self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
 
     def _migrate(self) -> None:
         """旧库升级：缺列/缺表则补。"""
@@ -115,6 +124,7 @@ class Store:
             self.conn.execute("DELETE FROM prices WHERE display_id=?", (did,))
             self.conn.execute("DELETE FROM inventories WHERE display_id=?", (did,))
             self.conn.execute("DELETE FROM variants WHERE display_id=?", (did,))
+            self.conn.execute("DELETE FROM alert_log WHERE display_id=?", (did,))
         return True
 
     @staticmethod
@@ -203,6 +213,21 @@ class Store:
             return None
         return VariantSnapshot(row["ts"], row["variant"], bool(row["in_stock"]),
                                row["state"], row["quantity"])
+
+    # ---------- 提醒冷却 ----------
+    def last_alert(self, display_id: str, kind: str) -> float | None:
+        row = self.conn.execute(
+            "SELECT ts FROM alert_log WHERE display_id=? AND kind=?",
+            (display_id, kind),
+        ).fetchone()
+        return row["ts"] if row else None
+
+    def mark_alert(self, display_id: str, kind: str, ts: float | None = None) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO alert_log VALUES (?,?,?)",
+            (display_id, kind, ts if ts is not None else time.time()),
+        )
+        self.conn.commit()
 
     # ---------- 统计 ----------
     def summary(self) -> dict:

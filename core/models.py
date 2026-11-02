@@ -8,6 +8,7 @@ from datetime import date
 PLATFORM_UNIQLO = "uniqlo"
 PLATFORM_JD = "jd"
 PLATFORM_TAOBAO = "taobao"
+PLATFORM_GENERIC = "generic"  # 通用站点：用配置里的正则解析任意电商页面
 PLATFORMS = (PLATFORM_UNIQLO, PLATFORM_JD, PLATFORM_TAOBAO)
 
 
