@@ -70,3 +70,18 @@ class VariantSnapshot:
     @property
     def label(self) -> str:
         return self.state or ("有货" if self.in_stock else "无货")
+
+
+@dataclass
+class HealthState:
+    """抓取健康度：连续失败次数用于发现「监控悄悄失效」。"""
+
+    display_id: str
+    consecutive_failures: int = 0
+    last_ok_ts: float | None = None
+    last_error: str = ""
+    updated_ts: float | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.consecutive_failures == 0

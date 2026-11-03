@@ -32,6 +32,7 @@ class ProductReport:
     windows: list = field(default_factory=list)
     target_price: float | None = None
     category_name: str = ""
+    trend: object | None = None           # predictor.forecast.TrendForecast
 
 
 # ------------------------------------------------------------------ SVG
@@ -136,6 +137,23 @@ def _stat(label: str, value: str) -> str:
             f'<div style="font-size:15px;font-weight:600">{value}</div></div>')
 
 
+def _trend_html(trend: object | None) -> str:
+    """趋势外推一行（约 30 天后价格 + 区间）。"""
+    if not trend:
+        return ""
+    arrow = {"down": "↘", "up": "↗", "flat": "→"}.get(
+        getattr(trend, "direction", "flat"), "→")
+    color = {"down": ACCENT, "up": WARN, "flat": "#5b6478"}.get(
+        getattr(trend, "direction", "flat"), "#5b6478")
+    try:
+        text = (f'<div style="margin-top:6px;font-size:12px;color:{color}">'
+                f'{arrow} 趋势外推 {trend.days} 天后约 ¥{trend.projected:,.0f}'
+                f'（区间 ¥{trend.low:,.0f} ~ ¥{trend.high:,.0f}，样本 {trend.samples} 个）</div>')
+    except AttributeError:
+        return ""
+    return text
+
+
 def _card(item: ProductReport) -> str:
     s = item.stats
     rec = item.recommendation
@@ -168,8 +186,13 @@ def _card(item: ProductReport) -> str:
             f'font-size:13px;line-height:1.7;margin-top:12px">'
             f'<b>未来 30 天降价概率：{p.prob_30d:.0%}</b>'
             f'<div style="color:#5b6478;margin-top:4px">预计窗口 '
-            f'{p.likely_start:%m-%d} ~ {p.likely_end:%m-%d}｜{escape(p.reason)}</div></div>'
+            f'{p.likely_start:%m-%d} ~ {p.likely_end:%m-%d}｜{escape(p.reason)}</div>'
+            + _trend_html(item.trend)
+            + '</div>'
         )
+    elif item.trend:
+        pred_html = ('<div style="background:#f6f7f9;border-radius:10px;padding:12px 14px;'
+                     f'font-size:13px;margin-top:12px">{_trend_html(item.trend)}</div>')
     reasons_html = ""
     if rec:
         reasons_html = (

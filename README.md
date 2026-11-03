@@ -9,7 +9,8 @@
 - 目标价提醒：`--target 500`，只在价格「穿越」目标价时提醒一次，不重复轰炸
 - 尺码/SKU 级库存：`--size M`，只关心你穿的码，M 码补货单独通知
 - **提醒冷却期**：按类型分别设置（降价 12h / 新低 24h / 补货 6h），避免反复轰炸
-- 多渠道通知：Server酱（微信）/ 钉钉 / 企业微信 / Telegram / 邮件 SMTP / 通用 Webhook，`test-notify` 一键自检
+- **监控健康度**：连续抓取失败自动告警（`status` 可查），避免“监控悄悄失效却以为在盯”
+- 多渠道通知：Server酱（微信）/ 钉钉 / 企业微信 / Telegram / **Bark / ntfy / PushDeer** / 邮件 SMTP / 通用 Webhook，`test-notify` 一键自检
 - 云端免费监控：GitHub Actions 定时跑，产物 HTML 报告自动上传为 Artifact
 
 **查看与分享**
@@ -17,6 +18,7 @@
 - 终端报告、`report` 自包含 HTML 报告、`chart` SVG/PNG 图表
 - **本地 Web 面板**：`serve` 启动零依赖只读面板，支持搜索、排序、价格曲线、尺码库存
 - **清单备份与家庭共享**：`export` / `import-list`，可带价格历史，随时迁移或分享
+- **多币种显示**：`--currency USD` 或配置默认币种，价格仍以 CNY 入库、仅展示换算
 
 **省钱计算**
 
@@ -27,8 +29,9 @@
 
 - 历史统计：最低/最高/均价、价格分位、降价间隔与平均降幅、终端走势图
 - 降价概率：历史降价节奏 + 平台大促日历（618 / 双11 / 双12 / 年货节…）融合估计未来 30 天
+- **趋势外推**：对近 90 天价格做线性回归，给出 30 天后预测价与区间（数据不足时自动不出结论）
 - 季节类目模型：回答“羽绒服发售多久后买最划算”——9 月上新定价最硬，双11 首个深折扣，次年 2 月中~3 月底季末清仓约 6.5 折是全年最低窗口
-- 库存感知推荐：结合库存状态给出「立即购买 / 尽快入手 / 建议等待 / 关注补货」
+- 库存感知推荐：结合库存状态与趋势方向给出「立即购买 / 尽快入手 / 建议等待 / 关注补货」
 
 **可视化与冷启动**
 
@@ -88,10 +91,17 @@ python main.py bundle --file bundle.json                # 自定义组合
 # 7. 维护与分享
 python main.py edit 1 --target 450 --size L             # 改目标价/尺码
 python main.py sizes 1 --refresh                        # 刷新尺码库存
+python main.py status                                   # 监控健康度（抓取失败排查）
 python main.py export --with-prices                     # 导出清单（含价格历史）
 python main.py import-list wishlist.json --overwrite    # 导入并合并
 python main.py test-notify                              # 通知渠道自检
 python main.py rm 1
+
+# 8. 尺码助手与多币种
+python main.py fit --kind top --alpha L                 # 字母码 ↔ 中/美/欧/日
+python main.py fit --kind top --height 178 --chest 100  # 按身材推荐
+python main.py fit --kind shoes --cn 260                # 鞋码换算
+python main.py --currency USD analyze 1                 # 用美元展示价格
 ```
 
 `my_coupons.json`（`deal --coupons` / `bundle --coupons`）：
@@ -172,13 +182,14 @@ python main.py serve --port 9000     # 自定义端口
 ```
 smart-shopper/
 ├── main.py                # CLI：add/edit/list/rm/check/analyze/history/seed/
-│                          #      chart/report/deal/cart/bundle/sizes/serve/
-│                          #      export/import-list/test-notify/init/demo
+│                          #      chart/report/deal/cart/bundle/sizes/fit/serve/
+│                          #      export/import-list/status/test-notify/init/demo
 ├── pyproject.toml         # 可 pip 安装（console script: smart-shopper）
 ├── core/
-│   ├── models.py          # Product / PricePoint / InventorySnapshot / VariantSnapshot
-│   ├── storage.py         # SQLite（商品/价格/库存/尺码/提醒冷却，自动迁移旧库）
+│   ├── models.py          # Product / PricePoint / InventorySnapshot / VariantSnapshot / HealthState
+│   ├── storage.py         # SQLite（商品/价格/库存/尺码/提醒冷却/健康度，自动迁移旧库）
 │   ├── sparkline.py       # 终端价格走势图
+│   ├── currency.py        # 多币种展示换算
 │   └── report.py          # SVG 走势图 + 自包含 HTML 报告 + PNG（可选）
 ├── datasource/            # 第三方历史价（慢慢买）+ CSV 导入
 ├── monitors/
@@ -191,14 +202,15 @@ smart-shopper/
 │   ├── deals.py           # 叠券穷举引擎
 │   └── bundle.py          # 多商品组合凑单规划
 ├── predictor/
-│   ├── forecast.py        # 历史统计、大促日历、降价概率、购买建议
-│   └── season.py          # 季节类目模型
+│   ├── forecast.py        # 历史统计、大促日历、降价概率、趋势回归、购买建议
+│   ├── season.py          # 季节类目模型
+│   └── sizing.py          # 尺码换算助手
 ├── webui/dashboard.py     # 本地只读 Web 面板（标准库）
-├── notifier/              # Server酱/钉钉/企微/Telegram/邮件/Webhook
+├── notifier/              # Server酱/钉钉/企微/Telegram/Bark/ntfy/PushDeer/邮件/Webhook
 ├── .github/workflows/
 │   ├── ci.yml             # 三版本 Python 跑测试
 │   └── scheduled-check.yml# 云端定时监控 + 报告 Artifact
-└── tests/                 # 53 个单元测试
+└── tests/                 # 74 个单元测试
 ```
 
 ## 配置
@@ -209,7 +221,12 @@ smart-shopper/
 {
   "db": "shopper.db",
   "check_interval_seconds": 3600,
-  "alert_cooldown_hours": { "drop": 12, "low": 24, "target": 0, "restock": 6, "variant": 6 },
+  "health_alert_after": 3,
+  "currency": { "code": "CNY", "rates": { "USD": 0.14, "EUR": 0.128, "JPY": 20.6 } },
+  "alert_cooldown_hours": {
+    "drop": 12, "low": 24, "target": 0, "restock": 6,
+    "variant": 6, "stockout": 12, "monitor": 24
+  },
   "jd": { "area": "1_72_2799_0" },
   "uniqlo": { "api_template": "", "playwright_fallback": true },
   "taobao": { "cookie": "", "playwright_fallback": true },
@@ -229,6 +246,10 @@ smart-shopper/
     "wecom_webhook": "",
     "telegram_bot_token": "",
     "telegram_chat_id": "",
+    "bark_url": "",
+    "ntfy_topic": "",
+    "ntfy_token": "",
+    "pushdeer_key": "",
     "webhook_url": "",
     "email": {
       "smtp_host": "smtp.qq.com", "smtp_port": 465,
@@ -240,6 +261,8 @@ smart-shopper/
 
 - `jd.area`：库存查询收货区域码（`1_72_2799_0` 为北京），不同区域库存不同
 - `alert_cooldown_hours`：同类提醒的冷却小时数，可只填想改的项；填 `0` 表示每次都提醒
+- `health_alert_after`：连续抓取失败多少次后推送「监控异常」
+- `currency`：默认展示币种与汇率（相对 1 CNY），也可用 `--currency` 临时覆盖
 - `notify.*`：多渠道可同时启用；邮件用 SMTP，465 端口走 SSL，587 走 STARTTLS
 - `playwright_fallback`：解析失败时是否用浏览器渲染兜底（需先安装 playwright）
 - 配置也可用环境变量 `SMART_SHOPPER_CONFIG`（JSON 字符串）注入，优先级高于文件——GitHub Actions 就是这样读 Secrets 的
@@ -277,6 +300,43 @@ python main.py add "https://mobile.yangkeduo.com/goods.html?goods_id=123" \
 - `stock_regex` 命中视为有货，`stockout_regex` 命中视为无货；都没命中则库存记为未知
 - `playwright: true`：该站点请求后用浏览器渲染再解析（应对前端渲染或风控）
 - 查找价格的正则可先用浏览器「查看源代码」或 `curl` 得到 HTML，再定位价格字段
+
+## 尺码助手
+
+```bash
+python main.py fit --kind top --table                    # 男装上衣完整对照表
+python main.py fit --kind top --alpha L                 # L 对应中/美/欧/日码
+python main.py fit --kind top --height 178 --chest 100  # 按身材推荐
+python main.py fit --kind top --gender women --chest 86
+python main.py fit --kind shoes --cn 260                # 中国 260mm → 欧 42 / 美 8.5 / 英 8
+python main.py fit --kind shoes --gender women --eu 38
+```
+
+数据是常见成衣尺码表的近似整理（优衣库、京东等品牌通用性较高）。不同版型（修身/宽松）会有偏差，
+下单前请以商品页尺码表为准；数值落在交界处时会提示「建议选大一码」。
+
+## 多币种显示
+
+```bash
+python main.py --currency USD list
+python main.py --currency JPY analyze 1
+```
+
+或在 `config.json` 里设默认币种：`"currency": { "code": "USD", "rates": { "USD": 0.14 } }`。
+
+价格始终以人民币入库，只在展示层换算，因此历史数据不会因汇率变化而失真；
+汇率是本地静态近似值（可自行覆盖），不联网、不用于交易。Web 面板会跟随同一配置自动换算坐标轴与数值。
+
+## 监控健康度
+
+```bash
+python main.py status
+```
+
+- 每轮抓取都会记录成功/失败；连续失败达到 `health_alert_after`（默认 3 次）自动推送「监控异常」
+- `status` 展示每件商品的连续失败次数、最近成功时间与最近错误
+- 常见失败原因：Cookie 失效、商品下架、接口改版、网络/代理受限
+- 连续失败告警同样受冷却期约束（默认 24 小时），不会每轮重复刷屏
 
 ## 提醒冷却与去重
 
@@ -334,9 +394,11 @@ python main.py import-list wishlist.json --overwrite    # 覆盖本地字段
 | 大促日历 | 30 天内有 618/双11 等大促 → 概率 +35% |
 | 价格分位 | 当前价处历史低位 → 降低再降预期 |
 | 季节模型 | 类目清仓月 + 发后天数（羽绒类 90~150 天） |
+| 趋势外推 | 近 90 天线性回归：下行且 30 天预测跌幅 ≥8% → 建议再等；上行且处低位 → 建议入手 |
 | 库存 | 无货→关注补货；低价 + 库存紧张→尽快入手 |
 
 决策融合为 0-100 分，映射到「立即购买 / 尽快入手 / 建议等待 / 关注补货」。目标价提醒采用「穿越」判定，同一目标价只提醒一次。
+趋势外推在样本少于 4 个或跨度不足 5 天时自动不出结论，避免给出假精度；区间至少 ±1%。
 
 ## 测试
 
@@ -344,20 +406,23 @@ python main.py import-list wishlist.json --overwrite    # 覆盖本地字段
 python -m unittest discover -s tests -v
 ```
 
-53 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出。
+74 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、趋势回归、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出、币种换算、尺码助手、监控健康度。
 
 ## Roadmap
 
 - [x] 通用站点价格源（拼多多 / 唯品会 / 天猫超市 / 任意站点正则接入）
 - [x] 尺码/SKU 级库存与关注尺码补货提醒
+- [x] 尺码换算助手（优衣库/JD/欧码对照）
 - [x] 价格提醒冷却期与去重
 - [x] 本地只读 Web 面板
 - [x] 购物清单导出/导入（家庭共享与备份）
-- [ ] 尺码换算助手（优衣库/JD/欧码对照）
-- [ ] 移动端推送渠道（Bark / ntfy / PushDeer）
-- [ ] 预测模型升级（趋势回归 + 置信区间）
-- [ ] 多币种与海外站点（汇率换算）
-- [ ] 监控健康度指标（连续抓取失败告警）
+- [x] 移动端推送渠道（Bark / ntfy / PushDeer）
+- [x] 预测模型升级（趋势回归 + 置信区间）
+- [x] 多币种显示
+- [x] 监控健康度（连续抓取失败告警）
+- [ ] 拼多多/唯品会 原生 API 适配（需处理签名与风控）
+- [ ] 多用户协同（云端共享同一份监控数据）
+- [ ] 到达提醒（在途物流/到货通知）
 
 ## 免责声明
 

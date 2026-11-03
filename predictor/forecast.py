@@ -69,6 +69,74 @@ class DropPrediction:
     reason: str = ""
 
 
+@dataclass
+class TrendForecast:
+    """基于近期价格的线性回归外推（含置信区间）。"""
+
+    days: int
+    slope_per_day: float      # 每天价格变化（元）
+    projected: float          # N 天后的中心预测价
+    low: float                # 区间下界（约 80% 置信）
+    high: float               # 区间上界
+    residual_std: float
+    samples: int
+    direction: str            # down / up / flat
+    current: float = field(default=0.0, repr=False)
+
+    def describe(self, money=lambda v: f"¥{v:g}") -> str:
+        pct = (self.projected - self.current) / self.current * 100 if self.current else 0
+        arrow = {"down": "↘", "up": "↗", "flat": "→"}.get(self.direction, "→")
+        return (f"{self.days} 天后约 {money(self.projected)}"
+                f"（区间 {money(self.low)} ~ {money(self.high)}），"
+                f"较当前 {pct:+.1f}% {arrow}")
+
+
+def trend_forecast(history: PriceHistory, days: int = 30,
+                   window_days: float = 90, min_points: int = 4) -> TrendForecast | None:
+    """对最近 window_days 的价格做最小二乘拟合，外推 days 天后的价格。
+
+    数据点太少或时间跨度过短时返回 None（避免给出假精度）。
+    """
+    pts = history.points
+    if len(pts) < min_points:
+        return None
+    t_end = pts[-1].ts
+    recent = [p for p in pts if p.ts >= t_end - window_days * 86400]
+    if len(recent) < min_points:
+        recent = pts[-min_points:]
+    span_days = (recent[-1].ts - recent[0].ts) / 86400
+    if span_days < 5:
+        return None
+
+    xs = [(p.ts - recent[0].ts) / 86400 for p in recent]
+    ys = [p.price for p in recent]
+    n = len(xs)
+    mean_x, mean_y = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx <= 0:
+        return None
+    sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    slope = sxy / sxx
+    intercept = mean_y - slope * mean_x
+    resid = [y - (intercept + slope * x) for x, y in zip(xs, ys)]
+    std = (sum(r * r for r in resid) / max(1, n - 2)) ** 0.5
+
+    future_x = xs[-1] + days
+    projected = max(0.0, intercept + slope * future_x)
+    # 区间至少 ±1%，避免完美线性数据给出"零误差"的假精度
+    half = max(1.28 * std, projected * 0.01)
+    low = max(0.0, projected - half)
+    high = projected + half
+    rel = slope * days / mean_y if mean_y else 0
+    direction = "down" if rel <= -0.02 else ("up" if rel >= 0.02 else "flat")
+
+    return TrendForecast(
+        days=days, slope_per_day=round(slope, 3), projected=round(projected, 2),
+        low=round(low, 2), high=round(high, 2), residual_std=round(std, 2),
+        samples=n, direction=direction, current=ys[-1],
+    )
+
+
 class PriceHistory:
     def __init__(self, points: list[PricePoint]):
         self.points = sorted(points, key=lambda p: p.ts)
@@ -206,8 +274,9 @@ class Recommendation:
 
 def recommend(history: PriceHistory, inventory: InventorySnapshot | None,
               prediction: DropPrediction, windows: list,
-              today: date | None = None) -> Recommendation:
-    """融合价格分位 + 降价预测 + 库存 + 季节窗口 → 购买决策。"""
+              today: date | None = None,
+              trend: "TrendForecast | None" = None) -> Recommendation:
+    """融合价格分位 + 降价预测 + 库存 + 季节窗口 + 趋势外推 → 购买决策。"""
     today = today or date.today()
     stats = history.stats()
     reasons: list[str] = []
@@ -259,6 +328,20 @@ def recommend(history: PriceHistory, inventory: InventorySnapshot | None,
         reasons.append("近两周价格处于下降通道")
         if stats.percentile > 0.5:
             score -= 5
+
+    # 线性回归外推：给「再等等」或「该出手」一个量化依据
+    if trend and trend.current:
+        delta = trend.current - trend.projected
+        drop_pct = delta / trend.current
+        if trend.direction == "down" and drop_pct >= 0.08 and stats.percentile > 0.25:
+            score -= 12
+            reasons.append(f"趋势外推 {trend.days} 天后约 ¥{trend.projected:g}"
+                           f"（-{drop_pct:.0%}），可再等")
+        elif trend.direction == "down" and drop_pct >= 0.03:
+            reasons.append(f"趋势温和下行：{trend.days} 天后约 ¥{trend.projected:g}")
+        elif trend.direction == "up" and stats.percentile <= 0.35:
+            score += 8
+            reasons.append(f"趋势上行（{trend.days} 天后约 ¥{trend.projected:g}），当前低价宜入手")
 
     score = max(0, min(100, score))
     if score >= 70:

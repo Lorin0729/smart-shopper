@@ -5,7 +5,8 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .models import (InventorySnapshot, PricePoint, Product, VariantSnapshot)
+from .models import (HealthState, InventorySnapshot, PricePoint, Product,
+                     VariantSnapshot)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS products (
@@ -49,6 +50,13 @@ CREATE TABLE IF NOT EXISTS alert_log (
     kind       TEXT NOT NULL,
     ts         REAL NOT NULL,
     PRIMARY KEY (display_id, kind)
+);
+CREATE TABLE IF NOT EXISTS health (
+    display_id           TEXT PRIMARY KEY,
+    consecutive_failures INTEGER DEFAULT 0,
+    last_ok_ts           REAL,
+    last_error           TEXT DEFAULT '',
+    updated_ts           REAL
 );
 """
 
@@ -125,6 +133,7 @@ class Store:
             self.conn.execute("DELETE FROM inventories WHERE display_id=?", (did,))
             self.conn.execute("DELETE FROM variants WHERE display_id=?", (did,))
             self.conn.execute("DELETE FROM alert_log WHERE display_id=?", (did,))
+            self.conn.execute("DELETE FROM health WHERE display_id=?", (did,))
         return True
 
     @staticmethod
@@ -228,6 +237,40 @@ class Store:
             (display_id, kind, ts if ts is not None else time.time()),
         )
         self.conn.commit()
+
+    # ---------- 抓取健康度 ----------
+    def record_fetch(self, display_id: str, ok: bool, error: str = "") -> HealthState:
+        now = time.time()
+        cur = self.health(display_id)
+        failures = 0 if ok else (cur.consecutive_failures if cur else 0) + 1
+        last_ok = now if ok else (cur.last_ok_ts if cur else None)
+        last_error = "" if ok else (error or "未知错误")[:200]
+        self.conn.execute(
+            "INSERT OR REPLACE INTO health VALUES (?,?,?,?,?)",
+            (display_id, failures, last_ok, last_error, now),
+        )
+        self.conn.commit()
+        return HealthState(display_id, failures, last_ok, last_error, now)
+
+    def health(self, display_id: str) -> HealthState | None:
+        row = self.conn.execute(
+            "SELECT * FROM health WHERE display_id=?", (display_id,)
+        ).fetchone()
+        return self._row_to_health(row) if row else None
+
+    def all_health(self) -> dict[str, HealthState]:
+        rows = self.conn.execute("SELECT * FROM health").fetchall()
+        return {r["display_id"]: self._row_to_health(r) for r in rows}
+
+    @staticmethod
+    def _row_to_health(r: sqlite3.Row) -> HealthState:
+        return HealthState(
+            display_id=r["display_id"],
+            consecutive_failures=r["consecutive_failures"] or 0,
+            last_ok_ts=r["last_ok_ts"],
+            last_error=r["last_error"] or "",
+            updated_ts=r["updated_ts"],
+        )
 
     # ---------- 统计 ----------
     def summary(self) -> dict:

@@ -5,6 +5,9 @@
 - dingtalk_webhook    钉钉群机器人（安全设置建议用"自定义关键词"，如包含"价格"）
 - wecom_webhook       企业微信群机器人
 - telegram_*          Telegram Bot（bot_token + chat_id）
+- bark_url            Bark（iOS 推送）：https://api.day.app/<你的 key>
+- ntfy_topic          ntfy：完整 URL，如 https://ntfy.sh/my-topic（可配 ntfy_token）
+- pushdeer_key        PushDeer 推送 key
 - webhook_url         通用 JSON Webhook（POST {"title","text","markdown"}）
 - email               邮件（SMTP：email.smtp_host / smtp_port / username / password / to / from）
 """
@@ -12,6 +15,7 @@ from __future__ import annotations
 
 import smtplib
 from email.message import EmailMessage
+from urllib.parse import quote
 
 import requests
 
@@ -26,8 +30,34 @@ class Notifier:
         self.wecom_webhook = cfg.get("wecom_webhook", "")
         self.telegram_token = cfg.get("telegram_bot_token", "")
         self.telegram_chat = cfg.get("telegram_chat_id", "")
+        self.bark_url = (cfg.get("bark_url") or "").rstrip("/")
+        self.ntfy_topic = cfg.get("ntfy_topic", "")
+        self.ntfy_token = cfg.get("ntfy_token", "")
+        self.pushdeer_key = cfg.get("pushdeer_key", "")
         self.webhook_url = cfg.get("webhook_url", "")
         self.email_cfg = cfg.get("email") or {}
+
+    def enabled_channels(self) -> list[str]:
+        names = []
+        if self.serverchan_key:
+            names.append("Server酱")
+        if self.dingtalk_webhook:
+            names.append("钉钉")
+        if self.wecom_webhook:
+            names.append("企业微信")
+        if self.telegram_token and self.telegram_chat:
+            names.append("Telegram")
+        if self.bark_url:
+            names.append("Bark")
+        if self.ntfy_topic:
+            names.append("ntfy")
+        if self.pushdeer_key:
+            names.append("PushDeer")
+        if self.webhook_url:
+            names.append("Webhook")
+        if self.email_cfg.get("smtp_host") and self.email_cfg.get("to"):
+            names.append("邮件")
+        return names
 
     def send(self, title: str, lines: list[str]) -> None:
         body = "\n".join(lines)
@@ -51,6 +81,18 @@ class Notifier:
         if self.telegram_token and self.telegram_chat:
             _json(f"https://api.telegram.org/bot{self.telegram_token}/sendMessage",
                   {"chat_id": self.telegram_chat, "text": f"{title}\n{body}"})
+        if self.bark_url:
+            _get(f"{self.bark_url}/{quote(title, safe='')}/{quote(body[:1000], safe='')}")
+        if self.ntfy_topic:
+            headers = {"Title": quote(title, safe=''), "Tags": "shopping"}
+            if self.ntfy_token:
+                headers["Authorization"] = f"Bearer {self.ntfy_token}"
+            _raw_post(self.ntfy_topic, body, headers)
+        if self.pushdeer_key:
+            _json("https://api2.pushdeer.com/message/push", {
+                "pushkey": self.pushdeer_key, "text": title,
+                "desp": body, "type": "markdown",
+            })
         if self.webhook_url:
             _json(self.webhook_url, {"title": title, "text": body, "markdown": body})
         if self.email_cfg:
@@ -84,6 +126,22 @@ class Notifier:
 def _form(url: str, data: dict) -> None:
     try:
         requests.post(url, data=data, timeout=TIMEOUT)
+    except requests.RequestException:
+        pass
+
+
+def _get(url: str) -> None:
+    try:
+        requests.get(url, timeout=TIMEOUT)
+    except requests.RequestException:
+        pass
+
+
+def _raw_post(url: str, body: str, headers: dict) -> None:
+    try:
+        requests.post(url, data=body.encode("utf-8"),
+                      headers={"Content-Type": "text/plain; charset=utf-8", **headers},
+                      timeout=TIMEOUT)
     except requests.RequestException:
         pass
 

@@ -14,8 +14,10 @@
   cart     购物车跨店凑单优化（JSON）
   bundle   多商品组合购买：怎么凑单最划算
   sizes    查看/刷新尺码库存
+  fit      尺码换算助手（字母码 / 鞋码）
   serve    启动本地只读 Web 面板
   export / import-list  备份与分享购物清单
+  status   监控健康度（抓取失败排查）
   test-notify 通知渠道自检
   init     生成配置文件
   demo     离线演示全部分析链路
@@ -42,14 +44,16 @@ from core.models import (InventorySnapshot, PLATFORM_GENERIC, PLATFORMS, PricePo
                          Product, VariantSnapshot)
 from core import report as core_report
 from core import sparkline as core_sparkline
+from core.currency import Currency, from_config as currency_from_config
 from core.storage import Store
 from datasource import HistorySourceError, dedupe, fetch_manmanbuy, load_csv
 from monitors import MonitorError, get_monitor, parse_product_url
 from notifier import Notifier
 from optimizer.bundle import plan_bundle
 from optimizer.deals import CartItem, DiscountRule, best_deal, demo_rules, optimize_cart
-from predictor import season
-from predictor.forecast import PriceHistory, predict_drop, recommend
+from predictor import season, sizing
+from predictor.forecast import (PriceHistory, predict_drop, recommend,
+                                trend_forecast)
 from webui.dashboard import serve as serve_dashboard
 
 ROOT = Path(__file__).resolve().parent
@@ -87,6 +91,21 @@ def resolve_product(store: Store, key: str) -> Product | None:
 
 def fmt_ts(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+# 展示币种：价格始终以人民币入库，仅输出时换算
+_CURRENCY = Currency("CNY")
+
+
+def money(value) -> str:
+    return _CURRENCY.format(value)
+
+
+def _configure_currency(cfg: dict, override: str | None) -> None:
+    global _CURRENCY
+    conf = cfg.get("currency")
+    rates = conf.get("rates") if isinstance(conf, dict) else None
+    _CURRENCY = Currency(override, rates) if override else currency_from_config(cfg)
 
 
 # ------------------------------------------------------------------ 子命令
@@ -158,9 +177,9 @@ def cmd_list(args, store: Store, cfg: dict) -> int:
         last = store.last_price(p.display_id())
         low = store.lowest_price(p.display_id())
         inv = store.last_inventory(p.display_id())
-        cur = f"¥{last.price:g}" if last else "-"
-        lo = f"¥{low.price:g}" if low else "-"
-        tgt = f"¥{p.target_price:g}" if p.target_price else "-"
+        cur = money(last.price) if last else "-"
+        lo = money(low.price) if low else "-"
+        tgt = money(p.target_price) if p.target_price else "-"
         stock = (inv.state or ("有货" if inv.in_stock else "无货")) if inv else "-"
         name = p.name + (f" [{p.watched_variant}]" if p.watched_variant else "")
         print(f"{i:<4} {p.display_id():<16} {p.category:<11} {cur:>8} {lo:>8} {tgt:>8} {stock:<5} {name}")
@@ -181,6 +200,7 @@ DEFAULT_ALERT_COOLDOWN = {
     "restock": 6,    # 补货
     "variant": 6,    # 尺码补货
     "stockout": 12,  # 变为无货
+    "monitor": 24,   # 监控失效（连续抓取失败）
 }
 
 
@@ -209,6 +229,7 @@ def check_cycle(store: Store, cfg: dict, notifier: Notifier) -> None:
         print("暂无跟踪商品。")
         return
     cooldowns = _cooldowns(cfg)
+    fail_threshold = int(cfg.get("health_alert_after", 3))
     alerts: list[tuple[str, str, str]] = []  # (kind, display_id, 文案)
 
     def add_alert(kind: str, did: str, text: str) -> None:
@@ -217,16 +238,25 @@ def check_cycle(store: Store, cfg: dict, notifier: Notifier) -> None:
             store.mark_alert(did, kind)
 
     for p in prods:
+        did = p.display_id()
         try:
             monitor = get_monitor(p.platform, cfg)
             point, inv = monitor.fetch(p.pid)
         except MonitorError as e:
-            print(f"[失败] {p.display_id()}: {e}")
+            health = store.record_fetch(did, False, str(e))
+            print(f"[失败] {did}: {e}（连续 {health.consecutive_failures} 次）")
+            if health.consecutive_failures >= fail_threshold:
+                add_alert("monitor", did,
+                          f"[监控异常] {p.name or did} 已连续 {health.consecutive_failures} 次抓取失败：{e}")
             continue
         if not point and not inv:
-            print(f"[失败] {p.display_id()}: 未取到任何数据")
+            health = store.record_fetch(did, False, "未取到任何数据")
+            print(f"[失败] {did}: 未取到任何数据（连续 {health.consecutive_failures} 次）")
+            if health.consecutive_failures >= fail_threshold:
+                add_alert("monitor", did,
+                          f"[监控异常] {p.name or did} 已连续 {health.consecutive_failures} 次抓取失败")
             continue
-        did = p.display_id()
+        store.record_fetch(did, True)
         prev = store.last_price(did)
         prev_inv = store.last_inventory(did)
         if point:
@@ -313,22 +343,23 @@ def cmd_analyze(args, store: Store, cfg: dict) -> int:
     prof = season.profile_of(p.category)
     windows = season.best_buy_windows(p.category, p.launch(), today)
     prediction = predict_drop(hist, today)
+    trend = trend_forecast(hist)
     inv = store.last_inventory(p.display_id())
-    rec = recommend(hist, inv, prediction, windows, today)
+    rec = recommend(hist, inv, prediction, windows, today, trend=trend)
 
     print("=" * 62)
-    print(f"商品分析：{p.name or p.display_id()}   [{p.platform}]")
+    print(f"商品分析：{p.name or p.display_id()}   [{p.platform}]   币种：{_CURRENCY.describe()}")
     print("=" * 62)
     if p.target_price:
         if stats:
             gap = stats.current - p.target_price
-            gap_txt = f"还差 ¥{gap:g}" if gap > 0 else "已达标"
-            print(f"目标价 ¥{p.target_price:g}（当前 ¥{stats.current:g}，{gap_txt}）")
+            gap_txt = f"还差 {money(gap)}" if gap > 0 else "已达标"
+            print(f"目标价 {money(p.target_price)}（当前 {money(stats.current)}，{gap_txt}）")
         else:
-            print(f"目标价 ¥{p.target_price:g}")
+            print(f"目标价 {money(p.target_price)}")
     if stats:
-        print(f"当前价 ¥{stats.current:g} | 最低 ¥{stats.low:g} | 最高 ¥{stats.high:g} "
-              f"| 均价 ¥{stats.avg:g} | 采样 {stats.count} 次")
+        print(f"当前价 {money(stats.current)} | 最低 {money(stats.low)} | 最高 {money(stats.high)} "
+              f"| 均价 {money(stats.avg)} | 采样 {stats.count} 次")
         print(f"价格分位 {stats.percentile:.0%} | 有效降价 {stats.drop_count} 次"
               + (f" | 平均间隔 {stats.avg_drop_interval_days:g} 天 | 平均降幅 {stats.avg_drop_depth:.0%}"
                  if stats.avg_drop_interval_days and stats.avg_drop_depth else ""))
@@ -349,6 +380,9 @@ def cmd_analyze(args, store: Store, cfg: dict) -> int:
     if prediction.likely_start:
         print(f"  预计窗口：{prediction.likely_start.strftime('%m-%d')} ~ {prediction.likely_end.strftime('%m-%d')}")
     print(f"  依据：{prediction.reason}")
+    if trend:
+        print(f"◆ 趋势外推（线性回归）：{trend.describe(money)}")
+        print(f"  斜率 {trend.slope_per_day:+g}/天 · 残差 σ={trend.residual_std:g} · 样本 {trend.samples}")
 
     print("-" * 62)
     print(f"◆ 购买时机（类目：{prof.name}）")
@@ -477,8 +511,8 @@ def cmd_history(args, store: Store, cfg: dict) -> int:
     print(f"走势 {core_sparkline.trend_line([pt.price for pt in points])}")
     tail = points[-args.limit:] if args.limit else points
     for pt in tail:
-        orig = f"（吊牌 ¥{pt.original_price:g}）" if pt.original_price else ""
-        print(f"  {fmt_ts(pt.ts)}  ¥{pt.price:g}{orig}")
+        orig = f"（吊牌 {money(pt.original_price)}）" if pt.original_price else ""
+        print(f"  {fmt_ts(pt.ts)}  {money(pt.price)}{orig}")
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
@@ -518,8 +552,9 @@ def _report_item(store: Store, p: Product, today: date) -> core_report.ProductRe
     prof = season.profile_of(p.category)
     windows = season.best_buy_windows(p.category, p.launch(), today)
     pred = predict_drop(hist, today)
+    trend = trend_forecast(hist)
     inv = store.last_inventory(p.display_id())
-    rec = recommend(hist, inv, pred, windows, today)
+    rec = recommend(hist, inv, pred, windows, today, trend=trend)
     variants = store.latest_variants(p.display_id())
     sub = (f"{p.display_id()} · {prof.name} · 采样 "
            f"{stats.count if stats else 0} 次 · 更新 {datetime.fromtimestamp(points[-1].ts):%m-%d %H:%M}"
@@ -528,7 +563,7 @@ def _report_item(store: Store, p: Product, today: date) -> core_report.ProductRe
         title=p.name or p.display_id(), subtitle=sub, url=p.url, points=points,
         stats=stats, prediction=pred, recommendation=rec, inventory=inv,
         variants=variants, windows=windows, target_price=p.target_price,
-        category_name=prof.name,
+        category_name=prof.name, trend=trend,
     )
 
 
@@ -564,7 +599,7 @@ def cmd_seed(args, store: Store, cfg: dict) -> int:
     if stats:
         print(f"历史区间：{datetime.fromtimestamp(all_points[0].ts):%Y-%m-%d} ~ "
               f"{datetime.fromtimestamp(all_points[-1].ts):%Y-%m-%d}"
-              f" | 最低 ¥{stats.low:g} | 最高 ¥{stats.high:g} | 均价 ¥{stats.avg:g}")
+              f" | 最低 {money(stats.low)} | 最高 {money(stats.high)} | 均价 {money(stats.avg)}")
         print("现在可以执行 analyze 查看预测与购买建议。")
     return 0
 
@@ -694,22 +729,10 @@ def cmd_sizes(args, store: Store, cfg: dict) -> int:
 
 def cmd_test_notify(args, store: Store, cfg: dict) -> int:
     notifier = Notifier(cfg.get("notify"))
-    enabled = []
-    if notifier.serverchan_key:
-        enabled.append("Server酱")
-    if notifier.dingtalk_webhook:
-        enabled.append("钉钉")
-    if notifier.wecom_webhook:
-        enabled.append("企业微信")
-    if notifier.telegram_token and notifier.telegram_chat:
-        enabled.append("Telegram")
-    if notifier.webhook_url:
-        enabled.append("Webhook")
-    if notifier.email_cfg.get("smtp_host") and notifier.email_cfg.get("to"):
-        enabled.append("邮件")
+    enabled = notifier.enabled_channels()
     if not enabled:
         print("尚未配置任何通知渠道。请在 config.json 的 notify 中至少填写一项，")
-        print("例如 serverchan_key 或 dingtalk_webhook，详见 README。")
+        print("例如 serverchan_key / dingtalk_webhook / bark_url / ntfy_topic，详见 README。")
         return 1
     print("已配置渠道：" + "、".join(enabled) + "，正在发送测试消息…")
     notifier.send("Smart Shopper 通知测试",
@@ -717,6 +740,81 @@ def cmd_test_notify(args, store: Store, cfg: dict) -> int:
                    f"当前共跟踪 {len(store.list_products())} 件商品。"])
     print("完成。若某个渠道没收到，请检查密钥/Webhook 与网络。")
     return 0
+
+
+def cmd_status(args, store: Store, cfg: dict) -> int:
+    """查看监控健康度：连续抓取失败的商品会标红。"""
+    prods = store.list_products()
+    if not prods:
+        print("暂无跟踪商品。")
+        return 0
+    health = store.all_health()
+    summary = store.summary()
+    print(f"数据库：{summary['products']} 件商品 · {summary['price_points']} 条价格 · "
+          f"{summary['inventory_points']} 条库存 · {summary['variant_points']} 条尺码采样")
+    print(f"{'序号':<4} {'商品':<16} {'状态':<12} {'最近成功':<17} 最近错误")
+    bad = 0
+    for i, p in enumerate(prods, 1):
+        h = health.get(p.display_id())
+        if not h:
+            state, last_ok, err = "未抓取", "-", ""
+        elif h.ok:
+            state, last_ok, err = "正常", fmt_ts(h.last_ok_ts) if h.last_ok_ts else "-", ""
+        else:
+            bad += 1
+            state = f"连续失败 {h.consecutive_failures} 次"
+            last_ok = fmt_ts(h.last_ok_ts) if h.last_ok_ts else "从未成功"
+            err = h.last_error[:38]
+        print(f"{i:<4} {p.display_id():<16} {state:<12} {last_ok:<17} {err}")
+    if bad:
+        print(f"\n⚠ {bad} 件商品抓取异常。常见原因：Cookie 失效、链接失效、接口变更、网络限制。")
+        print("可用 `python main.py check` 查看详细错误，或 `python main.py test-notify` 检查通知。")
+    return 0
+
+
+def cmd_fit(args, store: Store, cfg: dict) -> int:
+    """尺码换算助手：字母码 ↔ 中国号型 ↔ 美/欧/日码，以及鞋码互换。"""
+    gender = args.gender
+    if args.kind == "shoes":
+        if args.table:
+            print(f"{'男鞋' if gender == 'men' else '女鞋'}尺码对照：")
+            for row in sizing.shoes_table(gender):
+                print("  " + sizing.format_shoe_row(row))
+            return 0
+        if any(v is not None for v in (args.cn, args.eu, args.us, args.uk)):
+            match = sizing.convert_shoe(gender, cn=args.cn, eu=args.eu,
+                                        us=args.us, uk=args.uk)
+            row = match.row
+            print(f"鞋码换算（{'男' if gender == 'men' else '女'}）：")
+            print(f"  中国 {row['cn']}mm · 欧码 {row['eu']} · 美码 {row['us']:g} · 英码 {row['uk']:g}")
+            if match.note:
+                print(f"  提示：{match.note}")
+            return 0
+        print("请提供 --cn/--eu/--us/--uk 之一，或加 --table 查看完整对照表。")
+        return 1
+
+    if args.table:
+        print(f"{'男装' if gender == 'men' else '女装'}上衣尺码对照：")
+        for row in sizing.tops_table(gender):
+            print("  " + sizing.format_top_row(row))
+        return 0
+    if args.alpha:
+        target = args.alpha.strip().upper()
+        row = next((r for r in sizing.tops_table(gender) if r["alpha"] == target), None)
+        if not row:
+            print(f"未知字母码 {args.alpha}，可用：S/M/L/XL/XXL")
+            return 1
+        print(f"{target} 对照：" + sizing.format_top_row(row))
+        return 0
+    if args.height is not None or args.chest is not None:
+        match = sizing.recommend_top(gender, height=args.height, chest=args.chest)
+        print(f"推荐尺码：{match.row['alpha']}")
+        print("  " + sizing.format_top_row(match.row))
+        if match.note:
+            print(f"提示：{match.note}")
+        return 0
+    print("请提供 --alpha 或 --height/--chest，或加 --table 查看完整对照表。")
+    return 1
 
 
 def cmd_export(args, store: Store, cfg: dict) -> int:
@@ -803,7 +901,7 @@ def cmd_import(args, store: Store, cfg: dict) -> int:
 
 
 def cmd_serve(args, store: Store, cfg: dict) -> int:
-    serve_dashboard(store, host=args.host, port=args.port)
+    serve_dashboard(store, host=args.host, port=args.port, cfg=cfg)
     return 0
 
 
@@ -813,6 +911,7 @@ def build_parser() -> argparse.ArgumentParser:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", help="配置文件路径（默认 ./config.json）")
     ap.add_argument("--db", help="SQLite 数据库路径")
+    ap.add_argument("--currency", help="展示币种：USD/EUR/JPY/GBP/HKD…（价格仍以 CNY 入库）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("add", help="添加跟踪商品")
@@ -923,6 +1022,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("test-notify", help="发送一条测试通知，检查渠道配置")
     p.set_defaults(fn=cmd_test_notify)
+
+    p = sub.add_parser("status", help="查看监控健康度（抓取失败情况）")
+    p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("fit", help="尺码换算助手（上衣字母码 / 鞋码对照）")
+    p.add_argument("--kind", choices=["top", "shoes"], default="top", help="top=上衣，shoes=鞋")
+    p.add_argument("--gender", choices=["men", "women"], default="men")
+    p.add_argument("--alpha", help="字母码：S/M/L/XL/XXL")
+    p.add_argument("--height", type=float, help="身高 cm（推荐上衣尺码）")
+    p.add_argument("--chest", type=float, help="胸围 cm（推荐上衣尺码）")
+    p.add_argument("--cn", type=float, help="鞋：中国码 mm")
+    p.add_argument("--eu", type=float, help="鞋：欧码")
+    p.add_argument("--us", type=float, help="鞋：美码")
+    p.add_argument("--uk", type=float, help="鞋：英码")
+    p.add_argument("--table", action="store_true", help="打印完整对照表")
+    p.set_defaults(fn=cmd_fit)
     return ap
 
 
@@ -931,6 +1046,7 @@ def main(argv=None) -> int:
     cfg = load_config(args.config)
     if args.db:
         cfg["db"] = args.db
+    _configure_currency(cfg, args.currency)
     store = Store(cfg.get("db", "shopper.db"))
     return args.fn(args, store, cfg) or 0
 

@@ -16,9 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 from core import sparkline
+from core.currency import from_config as currency_from_config
 from core.storage import Store
 from predictor import season
-from predictor.forecast import PriceHistory, predict_drop, recommend
+from predictor.forecast import (PriceHistory, predict_drop, recommend,
+                                trend_forecast)
 
 MAX_POINTS = 140
 
@@ -40,9 +42,11 @@ def product_payload(store: Store, p, today: date | None = None) -> dict:
     prof = season.profile_of(p.category)
     windows = season.best_buy_windows(p.category, p.launch(), today)
     prediction = predict_drop(hist, today)
+    trend = trend_forecast(hist)
     inv = store.last_inventory(did)
     variants = store.latest_variants(did)
-    rec = recommend(hist, inv, prediction, windows, today)
+    health = store.health(did)
+    rec = recommend(hist, inv, prediction, windows, today, trend=trend)
 
     sampled = _downsample(points)
     payload = {
@@ -78,6 +82,17 @@ def product_payload(store: Store, p, today: date | None = None) -> dict:
             "end": prediction.likely_end.isoformat() if prediction.likely_end else None,
             "reason": prediction.reason,
         },
+        "trend": (None if not trend else {
+            "days": trend.days, "projected": trend.projected,
+            "low": trend.low, "high": trend.high,
+            "direction": trend.direction, "samples": trend.samples,
+        }),
+        "health": (None if not health else {
+            "ok": health.ok,
+            "failures": health.consecutive_failures,
+            "last_ok": (int(health.last_ok_ts * 1000) if health.last_ok_ts else None),
+            "error": health.last_error,
+        }),
         "windows": [{
             "tag": w.tag, "start": w.start.isoformat(), "end": w.end.isoformat(),
             "discount": round(w.expected_discount * 10, 1),
@@ -87,21 +102,25 @@ def product_payload(store: Store, p, today: date | None = None) -> dict:
     return payload
 
 
-def build_summary(store: Store, today: date | None = None) -> dict:
+def build_summary(store: Store, today: date | None = None,
+                  cfg: dict | None = None) -> dict:
     today = today or date.today()
     products = [product_payload(store, p, today) for p in store.list_products()]
+    cur = currency_from_config(cfg)
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "today": today.isoformat(),
         "count": len(products),
         "products": products,
         "db": store.summary(),
+        "currency": {"code": cur.code, "symbol": cur.symbol.strip(), "rate": cur.rate},
     }
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
     db_path: str
-    server_version = "SmartShopper/0.4"
+    currency_cfg: dict = {}
+    server_version = "SmartShopper/0.5"
 
     def log_message(self, fmt, *args):  # 精简日志
         print(f"[web] {self.address_string()} {fmt % args}")
@@ -119,7 +138,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._send_html(INDEX_HTML)
         elif path == "/api/summary":
-            self._with_store(lambda st: build_summary(st))
+            self._with_store(lambda st: build_summary(st, cfg=self.currency_cfg))
         elif path == "/api/health":
             self._send_json({"ok": True, "ts": int(time.time())})
         elif path.startswith("/api/product/"):
@@ -162,8 +181,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def serve(store: Store, host: str = "127.0.0.1", port: int = 8777) -> None:
-    handler = type("Handler", (DashboardHandler,), {"db_path": str(store.path)})
+def serve(store: Store, host: str = "127.0.0.1", port: int = 8777,
+          cfg: dict | None = None) -> None:
+    handler = type("Handler", (DashboardHandler,), {
+        "db_path": str(store.path), "currency_cfg": cfg or {},
+    })
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"Smart Shopper 面板已启动：http://{host}:{port}  （Ctrl+C 退出）")
     try:
@@ -231,7 +253,8 @@ a{color:var(--accent);text-decoration:none;word-break:break-all}
 <script>
 const A={立即购买:'var(--good)',尽快入手:'var(--good)',建议等待:'var(--warn)',关注补货:'var(--bad)'};
 let DATA=[];
-const fmt=n=>n==null?'-':'¥'+Number(n).toLocaleString('zh-CN',{maximumFractionDigits:1});
+let CUR={symbol:'¥',rate:1,code:'CNY'};
+const fmt=n=>n==null?'-':CUR.symbol+Number(n*CUR.rate).toLocaleString('zh-CN',{maximumFractionDigits:1});
 function chart(pts,target,w=520,h=150){
   if(!pts||pts.length<2)return '<div style="height:150px;background:#f6f7f9;border-radius:10px;'+
     'display:flex;align-items:center;justify-content:center;color:#8b93a7;font-size:13px">暂无价格数据</div>';
@@ -245,7 +268,8 @@ function chart(pts,target,w=520,h=150){
   let grid='';
   for(let i=0;i<4;i++){const y=10+(h-26)*i/3;const v=hh-(hh-l)*i/3;
     grid+='<line x1="52" y1="'+y+'" x2="'+(w-12)+'" y2="'+y+'" stroke="#e8ebf1"/>'+
-    '<text x="46" y="'+(y+4)+'" text-anchor="end" font-size="10" fill="#8b93a7">¥'+Math.round(v)+'</text>';}
+    '<text x="46" y="'+(y+4)+'" text-anchor="end" font-size="10" fill="#8b93a7">'+
+    CUR.symbol+Math.round(v*CUR.rate)+'</text>';}
   const tline=target?('<line x1="52" y1="'+Y(target).toFixed(1)+'" x2="'+(w-12)+'" y2="'+
     Y(target).toFixed(1)+'" stroke="var(--good)" stroke-dasharray="6 5" stroke-width="1.5"/>'+
     '<text x="'+(w-14)+'" y="'+(Y(target).toFixed(1)-5)+'" text-anchor="end" font-size="10" '+
@@ -274,6 +298,13 @@ function card(p){
     fmt(p.target_price)+'</b></div>'):'';
   const pred=p.prediction?('<div class="win">30 天降价概率 <b>'+(p.prediction.prob*100).toFixed(0)+
     '%</b> · 窗口 '+(p.prediction.start||'-')+' ~ '+(p.prediction.end||'-')+'</div>'):'';
+  const arrow={down:'↘',up:'↗',flat:'→'};
+  const trend=p.trend?('<div class="win" style="color:'+
+    ({down:'var(--accent)',up:'var(--warn)',flat:'#5b6478'}[p.trend.direction]||'#5b6478')+'">'+
+    (arrow[p.trend.direction]||'→')+' 趋势外推 '+p.trend.days+' 天后约 '+fmt(p.trend.projected)+
+    '（'+fmt(p.trend.low)+' ~ '+fmt(p.trend.high)+'）</div>'):'';
+  const health=(p.health&&p.health.failures>0)?('<div class="meta" style="color:var(--bad)">'+
+    '⚠ 连续抓取失败 '+p.health.failures+' 次：'+(p.health.error||'')+'</div>'):'';
   const wins=p.windows.map(w=>'<div class="win">'+(w.active?'<b style="color:var(--good)">● 当前窗口</b> ':'')+
     w.tag+'：'+w.start+' ~ '+w.end+' · '+w.discount+' 折</div>').join('');
   const reasons=p.reasons.length?'<ul class="reason">'+p.reasons.map(r=>
@@ -281,10 +312,10 @@ function card(p){
   return '<section class="card"><div class="row"><div>'+
     '<div class="name">'+p.name+'</div>'+
     '<div class="meta">'+p.id+' · '+p.category+(p.watched_variant?' · 关注 '+p.watched_variant:'')+'</div>'+
-    target+inv+vars+'</div><div style="text-align:right">'+badge+
+    target+inv+vars+health+'</div><div style="text-align:right">'+badge+
     '<div class="meta">决策分 '+p.score+'/100</div></div></div>'+
     '<div style="margin-top:14px">'+chart(p.points,p.target_price)+'</div>'+
-    '<div class="stats">'+stats+'</div>'+pred+wins+reasons+
+    '<div class="stats">'+stats+'</div>'+pred+trend+wins+reasons+
     '<div class="meta" style="margin-top:10px">来源：<a href="'+p.url+'" target="_blank" rel="noreferrer">'+
     p.url+'</a></div></section>';
 }
@@ -302,7 +333,8 @@ async function load(){
   try{
     const r=await fetch('/api/summary',{cache:'no-store'});
     const d=await r.json();DATA=d.products||[];
-    document.getElementById('gen').textContent='更新于 '+d.generated_at;
+    CUR=d.currency||CUR;
+    document.getElementById('gen').textContent='更新于 '+d.generated_at+' · '+CUR.code;
     document.getElementById('db').textContent='共 '+d.count+' 件商品 · '+
       d.db.price_points+' 条价格 · '+d.db.inventory_points+' 条库存 · '+
       d.db.variant_points+' 条尺码采样';

@@ -1,13 +1,16 @@
 {
   "db": "shopper.db",
   "check_interval_seconds": 3600,
+  "health_alert_after": 3,
+  "currency": { "code": "CNY", "rates": { "USD": 0.14, "EUR": 0.128, "JPY": 20.6 } },
   "alert_cooldown_hours": {
     "drop": 12,
     "low": 24,
     "target": 0,
     "restock": 6,
     "variant": 6,
-    "stockout": 12
+    "stockout": 12,
+    "monitor": 24
   },
   "jd": { "area": "1_72_2799_0", "cat": "", "venderId": "" },
   "uniqlo": { "api_template": "", "playwright_fallback": true },
@@ -31,6 +34,10 @@
     "wecom_webhook": "",
     "telegram_bot_token": "",
     "telegram_chat_id": "",
+    "bark_url": "",
+    "ntfy_topic": "",
+    "ntfy_token": "",
+    "pushdeer_key": "",
     "webhook_url": "",
     "email": {
       "smtp_host": "",
