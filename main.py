@@ -46,8 +46,10 @@ from core import report as core_report
 from core import sparkline as core_sparkline
 from core.currency import Currency, from_config as currency_from_config
 from core.storage import Store
+from core.variants import describe_watched, match_variants
 from datasource import HistorySourceError, dedupe, fetch_manmanbuy, load_csv
-from monitors import MonitorError, get_monitor, parse_product_url
+from monitors import MonitorError, get_monitor, resolve_product_url
+from monitors.uniqlo_parse import size_sort_key
 from notifier import Notifier
 from optimizer.bundle import plan_bundle
 from optimizer.deals import CartItem, DiscountRule, best_deal, demo_rules, optimize_cart
@@ -113,10 +115,10 @@ def cmd_add(args, store: Store, cfg: dict) -> int:
     if args.platform == PLATFORM_GENERIC:
         platform, pid = PLATFORM_GENERIC, args.url
     elif args.platform:
-        _, pid = parse_product_url(args.url)
+        _, pid = resolve_product_url(args.url)
         platform = args.platform
     else:
-        platform, pid = parse_product_url(args.url)
+        platform, pid = resolve_product_url(args.url)
     p = Product(platform=platform, pid=pid, url=args.url,
                 name=args.name or "", category=season.normalize_category(args.category or "general"),
                 launch_date=args.launch, target_price=args.target,
@@ -215,7 +217,10 @@ def _cooldowns(cfg: dict) -> dict:
 
 
 def _alert_allowed(store: Store, did: str, kind: str, cooldowns: dict, now_ts: float) -> bool:
-    hours = cooldowns.get(kind, 12)
+    # 尺码提醒的 kind 形如 variant:黑色 / M:restock，配置里只写基础类型 variant
+    hours = cooldowns.get(kind)
+    if hours is None:
+        hours = cooldowns.get(kind.split(":", 1)[0], 12)
     if hours <= 0:
         return True
     last = store.last_alert(did, kind)
@@ -287,16 +292,16 @@ def check_cycle(store: Store, cfg: dict, notifier: Notifier) -> None:
                 add_alert("stockout", did, f"[无货] {p.name or did} 变为无货")
 
         # 尺码/SKU 级库存（优衣库、京东、通用站点支持）
-        for text in _check_variants(store, monitor, p):
-            add_alert("variant", did, text)
+        for kind, text in _check_variants(store, monitor, p):
+            add_alert(kind, did, text)
 
     if alerts:
         notifier.send("Smart Shopper 价格提醒", [text for _k, _d, text in alerts])
         print(f"已发送 {len(alerts)} 条提醒（冷却期见 config.alert_cooldown_hours）")
 
 
-def _check_variants(store: Store, monitor, p: Product) -> list[str]:
-    """抓取尺码库存并检测关注尺码的补货。"""
+def _check_variants(store: Store, monitor, p: Product) -> list[tuple[str, str]]:
+    """抓取尺码库存并检测关注尺码的补货/售罄状态变化。"""
     try:
         variants = monitor.variants(p.pid) if hasattr(monitor, "variants") else []
     except Exception:  # noqa: BLE001
@@ -306,18 +311,32 @@ def _check_variants(store: Store, monitor, p: Product) -> list[str]:
     did = p.display_id()
     old = {v.variant: v for v in store.latest_variants(did)}
     store.add_variants(did, variants)
-    latest = {v.variant: v for v in variants}
-    if p.watched_variant and p.watched_variant in latest:
-        cur = latest[p.watched_variant]
-        before = old.get(p.watched_variant)
-        if before and not before.in_stock and cur.in_stock:
-            return [f"[尺码补货] {p.name or did} 尺码 {cur.variant} 已补货（{cur.label}）"]
+    alerts: list[tuple[str, str]] = []
+
+    if p.watched_variant:
+        targets = match_variants(variants, p.watched_variant)
+        for cur in targets:
+            before = old.get(cur.variant)
+            if not before:
+                continue
+            qty = f"，剩 {cur.quantity} 件" if cur.quantity is not None else ""
+            if not before.in_stock and cur.in_stock:
+                alerts.append((
+                    f"variant:{cur.variant}:restock",
+                    f"[尺码补货] {p.name or did} 尺码 {cur.variant} 已补货（{cur.label}{qty}）",
+                ))
+            elif before.in_stock and not cur.in_stock:
+                alerts.append((
+                    f"variant:{cur.variant}:soldout",
+                    f"[尺码售罄] {p.name or did} 尺码 {cur.variant} 已售罄",
+                ))
     else:
-        newly = [v.variant for v in variants
+        newly = [v for v in variants
                  if v.in_stock and old.get(v.variant) and not old[v.variant].in_stock]
         if newly:
-            return [f"[尺码补货] {p.name or did} 尺码 {'/'.join(newly)} 补货了"]
-    return []
+            labels = "、".join(v.variant for v in newly)
+            alerts.append(("variant:any:restock", f"[尺码补货] {p.name or did} {labels} 补货了"))
+    return alerts
 
 
 def cmd_check(args, store: Store, cfg: dict) -> int:
@@ -719,11 +738,24 @@ def cmd_sizes(args, store: Store, cfg: dict) -> int:
     if not variants:
         print("暂无尺码库存数据（先 check 或加 --refresh）。")
         return 1
-    print(f"{p.name or p.display_id()} 尺码库存（关注：{p.watched_variant or '未设置'}）")
+    watched = describe_watched(p.watched_variant) if p.watched_variant else "未设置"
+    print(f"{p.name or p.display_id()} 尺码库存（关注：{watched}）")
+    variants = sorted(
+        variants, key=lambda v: (v.color or "", size_sort_key(v.size or v.variant))
+    )
     for v in variants:
-        mark = "  ← 关注" if p.watched_variant and v.variant == p.watched_variant else ""
-        qty = f"（剩 {v.quantity} 件）" if v.quantity is not None else ""
-        print(f"  {v.variant:<6} {v.label}{qty}  {fmt_ts(v.ts)}{mark}")
+        mark = "  ← 关注" if p.watched_variant and match_variants([v], p.watched_variant) else ""
+        qty = f"，剩 {v.quantity} 件" if v.quantity is not None else ""
+        price = ""
+        if v.price:
+            price = f"  {money(v.price)}"
+        if v.discount:
+            price += f"（原价 {money(v.original_price)}，-{v.discount:.0%}）"
+        if v.member_price:
+            price += f"  会员 {money(v.member_price)}"
+        if v.limit:
+            price += f"  限购 {v.limit}"
+        print(f"  {v.variant:<20} {v.label}{qty}{price}  {fmt_ts(v.ts)}{mark}")
     return 0
 
 

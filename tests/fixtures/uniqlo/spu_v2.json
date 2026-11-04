@@ -1,0 +1,12 @@
+{
+  "code": "u0000000066172",
+  "data": {
+    "productName": "高级轻型羽绒服",
+    "originPrice": "599",
+    "skus": [
+      {"skuId": "A1", "colorName": "藏青色", "sizeName": "M", "salePrice": "399", "stockNum": 2},
+      {"skuId": "A2", "colorName": "藏青色", "sizeName": "L", "salePrice": 599, "stockNum": 0},
+      {"skuId": "B1", "colorName": "米色", "sizeName": "M", "salePrice": 499, "stockNum": "3"}
+    ]
+  }
+}

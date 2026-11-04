@@ -190,10 +190,12 @@ smart-shopper/
 │   ├── storage.py         # SQLite（商品/价格/库存/尺码/提醒冷却/健康度，自动迁移旧库）
 │   ├── sparkline.py       # 终端价格走势图
 │   ├── currency.py        # 多币种展示换算
+│   ├── variants.py        # 关注尺码匹配（颜色 + 尺码宽松匹配）
 │   └── report.py          # SVG 走势图 + 自包含 HTML 报告 + PNG（可选）
 ├── datasource/            # 第三方历史价（慢慢买）+ CSV 导入
 ├── monitors/
-│   ├── uniqlo.py          # 优衣库：价格/库存/尺码，接口可配置
+│   ├── uniqlo.py          # 优衣库：候选接口链 / 限流重试 / TTL 缓存 / 库存富集
+│   ├── uniqlo_parse.py    # 优衣库纯解析层（链接识别 / SKU 矩阵 / JSON-LD / 内嵌 JSON）
 │   ├── jd.py              # 京东：p.3.cn 价格 + c0.3.cn 库存 + SKU 尺码
 │   ├── taobao.py          # 淘宝/天猫：自备 Cookie（实验性）
 │   ├── generic.py         # 通用站点：配置正则即可接入任意电商页
@@ -210,7 +212,7 @@ smart-shopper/
 ├── .github/workflows/
 │   ├── ci.yml             # 三版本 Python 跑测试
 │   └── scheduled-check.yml# 云端定时监控 + 报告 Artifact
-└── tests/                 # 74 个单元测试
+└── tests/                 # 98 个单元测试
 ```
 
 ## 配置
@@ -228,7 +230,13 @@ smart-shopper/
     "variant": 6, "stockout": 12, "monitor": 24
   },
   "jd": { "area": "1_72_2799_0" },
-  "uniqlo": { "api_template": "", "playwright_fallback": true },
+  "uniqlo": {
+    "api_template": "", "api_templates": [],
+    "use_builtin_apis": true, "stock_api": true, "mobile_page": true,
+    "cache_ttl_seconds": 300, "request_timeout": 15,
+    "retry_times": 1, "retry_backoff_seconds": 1.5,
+    "cookie": "", "playwright_fallback": true
+  },
   "taobao": { "cookie": "", "playwright_fallback": true },
   "generic": {
     "sites": {
@@ -266,6 +274,85 @@ smart-shopper/
 - `notify.*`：多渠道可同时启用；邮件用 SMTP，465 端口走 SSL，587 走 STARTTLS
 - `playwright_fallback`：解析失败时是否用浏览器渲染兜底（需先安装 playwright）
 - 配置也可用环境变量 `SMART_SHOPPER_CONFIG`（JSON 字符串）注入，优先级高于文件——GitHub Actions 就是这样读 Secrets 的
+
+## 优衣库监控说明（中国站）
+
+优衣库是中国站主力数据源：价格、颜色 × 尺码库存、划线价、折扣率都能抓，并且带多级降级与限流处理。
+
+### 支持的链接形式
+
+```bash
+# 商品页链接（带推广参数也能识别）
+python main.py add "https://www.uniqlo.cn/product-detail.html?productCode=u0000000066172&utm_source=xxx" --size "乳白色 M"
+
+# 移动端 / 分享链接
+python main.py add "https://h.uniqlo.cn/?type=pc#/product?pid=u0000000066172"
+
+# 路径里带编号的链接
+python main.py add "https://www.uniqlo.cn/zh_CN/u0000000066172.html"
+
+# 直接填商品编号
+python main.py add "u0000000066172"
+```
+
+- `productCode`、`pid` 参数、链接中任意位置的 `u` + 13 位数字都能识别；
+- `u.uniqlo.cn` 短链会在 `add` 阶段联网展开一次（普通链接不会产生额外请求）；
+- 识别失败会明确提示支持的形式，不会静默失败。
+
+### 抓取链路
+
+按优先级逐级尝试，单层失败只记录原因、不影响后续降级：
+
+1. `uniqlo.api_template` / `api_templates`（自定义接口）
+2. 官方静态商品 JSON：完整颜色 × 尺码矩阵、价格、划线价
+3. 官方详情接口 JSON：价格兜底
+4. 官方摘要 JSON：商品级价格/库存兜底
+5. 商品页 HTML：JSON-LD → 内嵌 JSON → 页面可见价格
+6. 移动端页面
+7. Playwright 渲染（需安装 playwright）
+
+库存单独调用官方 `POST /stock/stock/query/zh_CN`（`type=DETAIL`），一次请求拿到所有 SKU 的 `skuStocks` 映射。价格取全部 SKU 的最低现价，因此某个便宜颜色售罄时价格历史不会被推高；该颜色是否可买看尺码表。
+
+### 配置项（`config.uniqlo`）
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `api_template` | `""` | 自定义 JSON 接口，支持 `{code}` 或 `{}` 占位 |
+| `api_templates` | `[]` | 额外候选接口，按顺序尝试 |
+| `use_builtin_apis` | `true` | 是否使用内置静态 JSON / 详情接口 |
+| `stock_api` | `true` | 是否调用库存接口富集 SKU 库存 |
+| `mobile_page` | `true` | 是否尝试移动端页面兜底 |
+| `cache_ttl_seconds` | `300` | 同一商品重复 check 的缓存时间；`0` 表示不缓存 |
+| `request_timeout` | `15` | 单次请求超时秒数 |
+| `retry_times` | `1` | 429/5xx/超时的重试次数（403 不重试） |
+| `retry_backoff_seconds` | `1.5` | 重试退避基数，会优先遵守 `Retry-After` |
+| `cookie` | `""` | 被风控时可填浏览器 Cookie |
+| `playwright_fallback` | `true` | 解析失败时用浏览器渲染兜底 |
+
+`fetch` 与 `variants` 共享同一份缓存：一次 `check` 只发 1 次商品请求 + 1 次库存请求。
+
+### 尺码库存与提醒
+
+```bash
+python main.py check
+python main.py sizes uniqlo:u0000000066172          # 查看颜色 × 尺码矩阵
+python main.py sizes uniqlo:u0000000066172 --refresh # 立即重新抓取
+```
+
+`--size` 支持三种写法：
+
+- `M`：所有颜色的 M；
+- `黑色`：该颜色所有尺码；
+- `乳白色 M` / `乳白色 / M`：精确到颜色 + 尺码。
+
+关注的 SKU 由「有货 → 无货」或「无货 → 有货」都会提醒（按 `alert_cooldown_hours.variant` 去重，默认 6 小时）；不写 `--size` 时，任一尺码补货都会提醒。
+
+### 常见问题
+
+- **403 / 429 被限流**：`check` 间隔调到 3600 秒以上；在 `uniqlo.cookie` 填浏览器 Cookie；短期可用 `--interval` 拉长；项目会自动读取 `Retry-After` 并退避重试一次。
+- **返回 404**：商品下架，或官网接口/静态 JSON 路径改版。可先用浏览器打开商品页确认编号，再升级项目或配置 `uniqlo.api_template`。
+- **价格有了但库存未知**：库存接口失败时不会伪造「有货」，`sizes` 会显示「库存未知」，也不会误触发补货提醒。
+- **短链打不开**：先在浏览器打开 `u.uniqlo.cn` 短链，复制跳转后的完整地址再 `add`。
 
 ## 通用站点监控（拼多多 / 唯品会 / 天猫超市 / 任意站点）
 
@@ -406,7 +493,7 @@ python main.py import-list wishlist.json --overwrite    # 覆盖本地字段
 python -m unittest discover -s tests -v
 ```
 
-74 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、趋势回归、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出、币种换算、尺码助手、监控健康度。
+98 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、趋势回归、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出、币种换算、尺码助手、监控健康度、优衣库链接识别/SKU 矩阵解析/库存合并/缓存/限流重试/多级降级。
 
 ## Roadmap
 

@@ -1,0 +1,21 @@
+{
+  "summary": {
+    "productCode": "u0000000066172",
+    "name": "摇粒绒高领上衣",
+    "originPrice": 299,
+    "minPrice": 199,
+    "maxPrice": 299,
+    "sizeList": ["S", "M", "L"],
+    "epLimitFlag": "Y"
+  },
+  "rows": [
+    {"productId": "u0000000066172000", "colorNo": "01", "style": "乳白色", "styleText": "478577/01乳白色", "size": "S", "sizeText": "S", "varyPrice": 299, "enabledFlag": "Y"},
+    {"productId": "u0000000066172001", "colorNo": "01", "style": "乳白色", "styleText": "478577/01乳白色", "size": "M", "sizeText": "M", "varyPrice": 199, "enabledFlag": "Y"},
+    {"productId": "u0000000066172002", "colorNo": "01", "style": "乳白色", "styleText": "478577/01乳白色", "size": "L", "sizeText": "L", "varyPrice": 299, "enabledFlag": "Y"},
+    {"productId": "u0000000066172010", "colorNo": "09", "style": "黑色", "styleText": "478577/09黑色", "size": "S", "sizeText": "S", "varyPrice": 299, "enabledFlag": "Y"},
+    {"productId": "u0000000066172011", "colorNo": "09", "style": "黑色", "styleText": "478577/09黑色", "size": "M", "sizeText": "M", "varyPrice": 299, "enabledFlag": "Y"},
+    {"productId": "u0000000066172012", "colorNo": "09", "style": "黑色", "styleText": "478577/09黑色", "size": "L", "sizeText": "L", "varyPrice": 299, "enabledFlag": "Y"}
+  ],
+  "attr_List": [],
+  "desc": ""
+}

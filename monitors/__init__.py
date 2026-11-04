@@ -12,24 +12,23 @@ from .generic import GenericMonitor
 from .jd import JdMonitor
 from .taobao import TaobaoMonitor
 from .uniqlo import UniqloMonitor
+from .uniqlo_parse import CODE_RE, is_uniqlo_link, parse_product_code
 
 __all__ = [
     "BaseMonitor", "MonitorError", "GenericMonitor", "JdMonitor", "TaobaoMonitor",
-    "UniqloMonitor", "parse_product_url", "get_monitor",
+    "UniqloMonitor", "parse_product_url", "resolve_product_url", "get_monitor",
 ]
 
 
 def parse_product_url(url: str) -> tuple[str, str]:
-    """从商品链接解析 (platform, pid)。"""
+    """从商品链接解析 (platform, pid)。纯本地解析，不发起网络请求。"""
     u = url.strip()
     low = u.lower()
 
-    if "uniqlo.cn" in low:
-        # https://www.uniqlo.cn/product-detail.html?productCode=u0000000064781
-        m = re.search(r"productCode=([A-Za-z0-9_-]+)", u)
-        if not m:
-            raise MonitorError("优衣库链接中未找到 productCode 参数")
-        return PLATFORM_UNIQLO, m.group(1)
+    if CODE_RE.fullmatch(u):
+        return PLATFORM_UNIQLO, u.lower()
+    if is_uniqlo_link(u):
+        return PLATFORM_UNIQLO, parse_product_code(u)
 
     if re.search(r"(item\.jd\.com|jd\.hk|3cn\.jd)", low) or "jd.com" in low:
         # https://item.jd.com/100012043978.html
@@ -54,6 +53,20 @@ def parse_product_url(url: str) -> tuple[str, str]:
         return PLATFORM_TAOBAO, iid
 
     raise MonitorError(f"暂不支持的平台链接：{url}")
+
+
+def resolve_product_url(url: str) -> tuple[str, str]:
+    """解析链接；优衣库短链（如 u.uniqlo.cn/xxx）会联网展开一次。
+
+    普通商品链接完全走本地解析，不产生网络请求。
+    """
+    try:
+        return parse_product_url(url)
+    except MonitorError:
+        if "uniqlo" not in (url or "").lower():
+            raise
+        from .uniqlo import expand_short_link
+        return PLATFORM_UNIQLO, expand_short_link(url)
 
 
 def get_monitor(platform: str, config: dict | None = None) -> BaseMonitor:

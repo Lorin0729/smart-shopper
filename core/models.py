@@ -62,14 +62,27 @@ class VariantSnapshot:
     """尺码/SKU 级库存采样。"""
 
     ts: float
-    variant: str  # 如 "M"、"XL"、"42"
+    variant: str  # 可读标识：有颜色时为 "颜色 / 尺码"，否则 "M"、"XL"、"42"
     in_stock: bool
     state: str = ""
     quantity: int | None = None
+    color: str = ""
+    size: str = ""
+    sku_id: str = ""
+    price: float | None = None
+    original_price: float | None = None
+    member_price: float | None = None
+    limit: int | None = None
 
     @property
     def label(self) -> str:
         return self.state or ("有货" if self.in_stock else "无货")
+
+    @property
+    def discount(self) -> float | None:
+        if self.price and self.original_price and self.original_price > self.price:
+            return 1 - self.price / self.original_price
+        return None
 
 
 @dataclass

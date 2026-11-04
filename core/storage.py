@@ -37,12 +37,19 @@ CREATE TABLE IF NOT EXISTS inventories (
     PRIMARY KEY (display_id, ts)
 );
 CREATE TABLE IF NOT EXISTS variants (
-    display_id TEXT NOT NULL,
-    variant    TEXT NOT NULL,
-    ts         REAL NOT NULL,
-    in_stock   INTEGER NOT NULL,
-    state      TEXT DEFAULT '',
-    quantity   INTEGER,
+    display_id     TEXT NOT NULL,
+    variant        TEXT NOT NULL,
+    ts             REAL NOT NULL,
+    in_stock       INTEGER NOT NULL,
+    state          TEXT DEFAULT '',
+    quantity       INTEGER,
+    color          TEXT DEFAULT '',
+    size           TEXT DEFAULT '',
+    sku_id         TEXT DEFAULT '',
+    price          REAL,
+    original_price REAL,
+    member_price   REAL,
+    "limit"        INTEGER,
     PRIMARY KEY (display_id, variant, ts)
 );
 CREATE TABLE IF NOT EXISTS alert_log (
@@ -82,6 +89,19 @@ class Store:
             self.conn.execute(
                 "ALTER TABLE products ADD COLUMN watched_variant TEXT DEFAULT ''"
             )
+
+        vcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(variants)")}
+        for name, ddl in (
+            ("color", "TEXT DEFAULT ''"),
+            ("size", "TEXT DEFAULT ''"),
+            ("sku_id", "TEXT DEFAULT ''"),
+            ("price", "REAL"),
+            ("original_price", "REAL"),
+            ("member_price", "REAL"),
+            ('"limit"', "INTEGER"),
+        ):
+            if name.strip('"') not in vcols:
+                self.conn.execute(f"ALTER TABLE variants ADD COLUMN {name} {ddl}")
 
     # ---------- 商品 ----------
     def add_product(self, p: Product) -> bool:
@@ -185,10 +205,16 @@ class Store:
         return InventorySnapshot(row["ts"], bool(row["in_stock"]), row["state"], row["quantity"])
 
     # ---------- 尺码 / SKU 变体 ----------
+    _VARIANT_COLUMNS = (
+        "display_id, variant, ts, in_stock, state, quantity, color, size, sku_id, "
+        "price, original_price, member_price, \"limit\""
+    )
+
     def add_variant(self, display_id: str, snap: VariantSnapshot) -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO variants VALUES (?,?,?,?,?,?)",
-            (display_id, snap.variant, snap.ts, int(snap.in_stock), snap.state, snap.quantity),
+            f"INSERT OR REPLACE INTO variants ({self._VARIANT_COLUMNS}) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            self._variant_params(display_id, snap),
         )
         self.conn.commit()
 
@@ -196,9 +222,17 @@ class Store:
         with self.conn:
             for s in snaps:
                 self.conn.execute(
-                    "INSERT OR REPLACE INTO variants VALUES (?,?,?,?,?,?)",
-                    (display_id, s.variant, s.ts, int(s.in_stock), s.state, s.quantity),
+                    f"INSERT OR REPLACE INTO variants ({self._VARIANT_COLUMNS}) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    self._variant_params(display_id, s),
                 )
+
+    @staticmethod
+    def _variant_params(display_id: str, s: VariantSnapshot) -> tuple:
+        return (
+            display_id, s.variant, s.ts, int(s.in_stock), s.state, s.quantity,
+            s.color, s.size, s.sku_id, s.price, s.original_price, s.member_price, s.limit,
+        )
 
     def latest_variants(self, display_id: str) -> list[VariantSnapshot]:
         """每个变体取最新一次采样。"""
@@ -208,20 +242,24 @@ class Store:
             ") t ON v.variant=t.variant AND v.ts=t.mts WHERE v.display_id=? ORDER BY v.variant",
             (display_id, display_id),
         ).fetchall()
-        return [
-            VariantSnapshot(r["ts"], r["variant"], bool(r["in_stock"]), r["state"], r["quantity"])
-            for r in rows
-        ]
+        return [self._row_to_variant(r) for r in rows]
 
     def last_variant(self, display_id: str, variant: str) -> VariantSnapshot | None:
         row = self.conn.execute(
             "SELECT * FROM variants WHERE display_id=? AND variant=? ORDER BY ts DESC LIMIT 1",
             (display_id, variant),
         ).fetchone()
-        if not row:
-            return None
-        return VariantSnapshot(row["ts"], row["variant"], bool(row["in_stock"]),
-                               row["state"], row["quantity"])
+        return self._row_to_variant(row) if row else None
+
+    @staticmethod
+    def _row_to_variant(r: sqlite3.Row) -> VariantSnapshot:
+        return VariantSnapshot(
+            ts=r["ts"], variant=r["variant"], in_stock=bool(r["in_stock"]),
+            state=r["state"] or "", quantity=r["quantity"],
+            color=r["color"] or "", size=r["size"] or "", sku_id=r["sku_id"] or "",
+            price=r["price"], original_price=r["original_price"],
+            member_price=r["member_price"], limit=r["limit"],
+        )
 
     # ---------- 提醒冷却 ----------
     def last_alert(self, display_id: str, kind: str) -> float | None:

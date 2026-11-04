@@ -55,7 +55,8 @@ class TestAlertCooldown(unittest.TestCase):
             def variants(self, pid):
                 return [VariantSnapshot(now, "M", True, "有货")]
 
-        texts = main._check_variants(self.store, FakeMonitor(), p)
+        alerts = main._check_variants(self.store, FakeMonitor(), p)
+        texts = [text for _kind, text in alerts]
         self.assertTrue(any("尺码 M" in t and "补货" in t for t in texts))
 
 
