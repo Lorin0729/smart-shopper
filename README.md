@@ -70,7 +70,9 @@ python main.py add "https://www.uniqlo.cn/product-detail.html?productCode=u00000
 python main.py seed 1
 python main.py seed 1 --csv history.csv      # 表头 datetime,price
 
-# 4. 监控
+# 4. 一条命令出结论 / 监控
+python main.py advise u0000000066172          # 买/等/关注 + 可购价 + 关注尺码 + 叠券
+python main.py advise u0000000066172 --coupons my_coupons.json
 python main.py check                          # 抓一轮
 python main.py check --watch --interval 3600  # 持续监控
 
@@ -212,7 +214,7 @@ smart-shopper/
 ├── .github/workflows/
 │   ├── ci.yml             # 三版本 Python 跑测试
 │   └── scheduled-check.yml# 云端定时监控 + 报告 Artifact
-└── tests/                 # 98 个单元测试
+└── tests/                 # 105 个单元测试
 ```
 
 ## 配置
@@ -278,6 +280,12 @@ smart-shopper/
 ## 优衣库监控说明（中国站）
 
 优衣库是中国站主力数据源：价格、颜色 × 尺码库存、划线价、折扣率都能抓，并且带多级降级与限流处理。
+
+最简用法：直接给货号，一条命令出结论（可购最低价、关注尺码、叠券、该不该等）：
+
+```bash
+python main.py advise u0000000066172
+```
 
 ### 支持的链接形式
 
@@ -493,7 +501,7 @@ python main.py import-list wishlist.json --overwrite    # 覆盖本地字段
 python -m unittest discover -s tests -v
 ```
 
-98 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、趋势回归、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出、币种换算、尺码助手、监控健康度、优衣库链接识别/SKU 矩阵解析/库存合并/缓存/限流重试/多级降级。
+105 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、趋势回归、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出、币种换算、尺码助手、监控健康度、优衣库链接识别/SKU 矩阵解析/库存合并/缓存/限流重试/多级降级、advise 可购价口径（售罄配色不参与决策）。
 
 ## Roadmap
 

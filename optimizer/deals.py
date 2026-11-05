@@ -226,6 +226,12 @@ def demo_rules(platform: str = "taobao") -> list[DiscountRule]:
             DiscountRule("jd_red", "平台红包", "fixed", 20, priority=50),
             DiscountRule("jd_bean", "京豆抵扣(上限2%)", "points", 15, max_off=0.02, priority=60),
         ]
+    if platform == "uniqlo":
+        # 演示券：优衣库没有淘宝式跨店满减，这里只放一条平台满减占位。
+        # 真实店铺券/会员券请用 `advise --coupons` 传入，避免把演示价当成交价。
+        return [
+            DiscountRule("uni_cross", "跨店满减 300-50", "full_off", 50, 300, priority=40),
+        ]
     return [
         DiscountRule("tb_item", "单品优惠", "fixed", 25, priority=20),
         DiscountRule("tb_store1", "店铺券 满300减50", "full_off", 50, 300, stack_group="store", priority=30),

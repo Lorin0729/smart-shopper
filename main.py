@@ -6,6 +6,7 @@
   edit     修改名称/类目/发售日/目标价/关注尺码
   check    抓取一轮价格与库存（--watch 持续监控）
   analyze  历史分析 + 降价预测 + 购买窗口 + 购买建议
+  advise   一条命令出结论：买/等/关注 + 可购价 + 叠券 + 时机
   history  价格历史明细与 CSV 导出
   seed     补历史价格（慢慢买 / CSV），让预测立刻可用
   chart    导出走势图（svg / html / png）
@@ -40,8 +41,8 @@ import time
 from datetime import date, datetime
 from pathlib import Path
 
-from core.models import (InventorySnapshot, PLATFORM_GENERIC, PLATFORMS, PricePoint,
-                         Product, VariantSnapshot)
+from core.models import (InventorySnapshot, PLATFORM_GENERIC, PLATFORM_UNIQLO,
+                         PLATFORMS, PricePoint, Product, VariantSnapshot)
 from core import report as core_report
 from core import sparkline as core_sparkline
 from core.currency import Currency, from_config as currency_from_config
@@ -49,10 +50,11 @@ from core.storage import Store
 from core.variants import describe_watched, match_variants
 from datasource import HistorySourceError, dedupe, fetch_manmanbuy, load_csv
 from monitors import MonitorError, get_monitor, resolve_product_url
-from monitors.uniqlo_parse import size_sort_key
+from monitors.uniqlo_parse import CODE_RE, size_sort_key
 from notifier import Notifier
 from optimizer.bundle import plan_bundle
-from optimizer.deals import CartItem, DiscountRule, best_deal, demo_rules, optimize_cart
+from optimizer.deals import (CartItem, DiscountRule, best_deal, best_price,
+                             demo_rules, optimize_cart)
 from predictor import season, sizing
 from predictor.forecast import (PriceHistory, predict_drop, recommend,
                                 trend_forecast)
@@ -82,13 +84,61 @@ def load_config(path: str | None) -> dict:
     return cfg
 
 
+UNIQLO_PRODUCT_PAGE = "https://www.uniqlo.cn/product-detail.html?productCode={pid}"
+
+
 def resolve_product(store: Store, key: str) -> Product | None:
+    key = (key or "").strip()
     if key.isdigit():
         prods = store.list_products()
         idx = int(key) - 1
         if 0 <= idx < len(prods):
             return prods[idx]
-    return store.get_product(key)
+    p = store.get_product(key)
+    if p:
+        return p
+    # 裸货号（u + 13 位数字）直接命中已跟踪的优衣库商品
+    if CODE_RE.fullmatch(key):
+        return store.get_product(f"{PLATFORM_UNIQLO}:{key.lower()}")
+    return None
+
+
+def _normalize_product_url(platform: str, pid: str, url: str) -> str:
+    """裸优衣库货号补成商品页链接，方便后续 seed / 导出复用。"""
+    if platform == PLATFORM_UNIQLO and CODE_RE.fullmatch((url or "").strip()):
+        return UNIQLO_PRODUCT_PAGE.format(pid=pid)
+    return url
+
+
+def _stocked_price(variants: list[VariantSnapshot]) -> tuple[VariantSnapshot | None, float | None]:
+    """可购最低价：只在有货且带价格的变体里取，售罄配色不参与决策。
+
+    注意：商品级历史价可能来自已售罄配色（例如 ¥699），不能直接当作「现在能买到的价」。
+    """
+    candidates = [v for v in variants if v.in_stock and v.price]
+    if not candidates:
+        return None, None
+    return min(candidates, key=lambda v: v.price), min(v.price for v in candidates)
+
+
+def _history_ready(points: list[PricePoint]) -> bool:
+    """历史是否够判断趋势：至少 3 个采样点且跨度 ≥ 3 天。"""
+    return len(points) >= 3 and (points[-1].ts - points[0].ts) >= 3 * 86400
+
+
+def _describe_deal(res) -> str:
+    parts = []
+    for rule, before, _after in res.applied:
+        if rule.kind == "every_full_off" and rule.step:
+            parts.append(f"{rule.name} ×{int(before // rule.step)}")
+        else:
+            parts.append(rule.name)
+    return " + ".join(parts) or "无可用优惠"
+
+
+def _trim_reason(text: str, limit: int = 25) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def fmt_ts(ts: float) -> str:
@@ -119,7 +169,8 @@ def cmd_add(args, store: Store, cfg: dict) -> int:
         platform = args.platform
     else:
         platform, pid = resolve_product_url(args.url)
-    p = Product(platform=platform, pid=pid, url=args.url,
+    p = Product(platform=platform, pid=pid,
+                url=_normalize_product_url(platform, pid, args.url),
                 name=args.name or "", category=season.normalize_category(args.category or "general"),
                 launch_date=args.launch, target_price=args.target,
                 watched_variant=(args.size or "").strip())
@@ -179,7 +230,14 @@ def cmd_list(args, store: Store, cfg: dict) -> int:
         last = store.last_price(p.display_id())
         low = store.lowest_price(p.display_id())
         inv = store.last_inventory(p.display_id())
-        cur = money(last.price) if last else "-"
+        variants = store.latest_variants(p.display_id())
+        _variant, buy_price = _stocked_price(variants)
+        if buy_price is not None:
+            cur = money(buy_price)  # 只展示「有货 SKU」的最低价，避免售罄配色误导
+        elif variants and not any(v.in_stock for v in variants):
+            cur = "售罄"
+        else:
+            cur = money(last.price) if last else "-"
         lo = money(low.price) if low else "-"
         tgt = money(p.target_price) if p.target_price else "-"
         stock = (inv.state or ("有货" if inv.in_stock else "无货")) if inv else "-"
@@ -456,7 +514,8 @@ def cmd_cart(args, store: Store, cfg: dict) -> int:
 
 def _load_rules(path: str) -> list[DiscountRule]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return [DiscountRule.from_dict(d) for d in data]
+    items = data.get("coupons", []) if isinstance(data, dict) else data
+    return [DiscountRule.from_dict(d) for d in items]
 
 
 def cmd_demo(args, store: Store, cfg: dict) -> int:
@@ -759,6 +818,148 @@ def cmd_sizes(args, store: Store, cfg: dict) -> int:
     return 0
 
 
+def cmd_advise(args, store: Store, cfg: dict) -> int:
+    """一条命令给出结论：买 / 等 / 关注，附可购价、关注尺码、叠券与时机。
+
+    价格口径红线：所有结论价都基于「有货」的 SKU；商品级历史价（可能来自售罄配色）
+    只用于价格位置与趋势，不能直接当作现在能买到的价。
+    """
+    p, added = _ensure_product(store, args.key)
+    if not p:
+        return 1
+    did = p.display_id()
+    if added:
+        print(f"已自动加入跟踪：{did}")
+
+    now = time.time()
+    variants: list[VariantSnapshot] = []
+    refresh_error = ""
+    try:
+        monitor = get_monitor(p.platform, cfg)
+        variants = list(monitor.variants(p.pid) or [])
+    except Exception as e:  # noqa: BLE001
+        refresh_error = str(e)
+    if variants:
+        store.add_variants(did, variants)
+    else:
+        variants = store.latest_variants(did)
+        if refresh_error:
+            print(f"[失败] {did}：{refresh_error}")
+        if not variants:
+            print("该商品/平台暂不支持尺码级库存，无法判断可购价。")
+            return 1
+        print(f"（刷新失败，以下使用上次记录的尺码数据，时间 {fmt_ts(max(v.ts for v in variants))}）")
+
+    buy_variant, buy_price = _stocked_price(variants)
+    watched_variants = match_variants(variants, p.watched_variant) if p.watched_variant else []
+    watched_variant = None
+    if watched_variants:
+        stocked = [v for v in watched_variants if v.in_stock and v.price]
+        watched_variant = min(stocked, key=lambda v: v.price) if stocked else watched_variants[0]
+
+    points = store.get_prices(did)
+    # 决策用当前可购价替换最后一条历史价，避免用售罄配色价判断买/等
+    decision_points = list(points)
+    if buy_price and decision_points:
+        decision_points[-1] = PricePoint(decision_points[-1].ts, buy_price,
+                                         decision_points[-1].original_price)
+    hist = PriceHistory(decision_points)
+    stats = hist.stats()
+    ready = _history_ready(points)
+    in_stock_any = any(v.in_stock for v in variants)
+    qty = sum(v.quantity for v in variants if v.in_stock and v.quantity is not None) or None
+    inv = InventorySnapshot(now, in_stock_any, "有货" if in_stock_any else "无货", qty)
+    today = date.today()
+    prediction = predict_drop(hist, today)
+    trend = trend_forecast(hist)
+    windows = season.best_buy_windows(p.category, p.launch(), today)
+    rec = recommend(hist, inv, prediction, windows, today, trend=trend)
+
+    if not in_stock_any:
+        action, reason = "关注", "全部尺码售罄，等补货提醒"
+    elif p.watched_variant and watched_variant and not watched_variant.in_stock:
+        action, reason = "关注", "关注尺码无货，可换色或等补货"
+    elif not ready:
+        action, reason = "等", "历史数据不足，先跑几天 check"
+    else:
+        if rec.action in ("立即购买", "尽快入手"):
+            action = "买"
+        elif rec.action == "关注补货":
+            action = "关注"
+        else:
+            action = "等"
+        reason = _trim_reason(rec.reasons[0] if rec.reasons else "")
+
+    print(f"【结论】{action} — {reason}")
+    print()
+    if buy_price:
+        print(f"可购最低价：{money(buy_price)}（{buy_variant.variant}）")
+    else:
+        print("可购最低价：无货（全部尺码售罄）")
+
+    if p.watched_variant and watched_variant:
+        qty_txt = f"，剩 {watched_variant.quantity} 件" if watched_variant.quantity is not None else ""
+        state = "有货" if watched_variant.in_stock else "无货"
+        # 全部售罄时不报价，避免「无货却给一个可买价」的误导
+        price_txt = money(watched_variant.price) + " · " if in_stock_any and watched_variant.price else ""
+        same = (p.watched_variant.replace(" ", "").replace("/", "")
+                == watched_variant.variant.replace(" ", "").replace("/", ""))
+        extra = "" if same else f"（{watched_variant.variant}）"
+        print(f"你关注的「{p.watched_variant}」：{price_txt}{state}{extra}{qty_txt}")
+    elif p.watched_variant:
+        print(f"你关注的「{p.watched_variant}」：本次数据中未找到对应尺码")
+    else:
+        print("关注尺码：未设置（可用 edit --size 指定颜色/尺码）")
+
+    if p.target_price and buy_price:
+        gap = buy_price - p.target_price
+        if gap > 0:
+            print(f"目标价 {money(p.target_price)}：还差 {money(gap)}（需再降 {gap / buy_price:.0%}）")
+        else:
+            print(f"目标价 {money(p.target_price)}：已达标")
+
+    if buy_price:
+        user_rules = bool(args.coupons)
+        try:
+            rules = _load_rules(args.coupons) if user_rules else demo_rules(p.platform)
+        except Exception as e:  # noqa: BLE001
+            print(f"券配置读取失败：{e}")
+            return 1
+        deal = best_price(buy_price, rules)
+        detail = _describe_deal(deal) + ("" if user_rules else " · 未计入你的个人券")
+        print(f"叠券后估算：{money(deal.final)}（{detail}）")
+
+    if ready and stats:
+        print(f"价格位置：历史 {stats.percentile:.0%} 分位 · 30 天内再降概率 {prediction.prob_30d:.0%}")
+    else:
+        print(f"价格位置：历史样本不足（{len(points)} 次采样），先跑几天 check 再给概率")
+
+    print(f"数据时间：{fmt_ts(max(v.ts for v in variants))}")
+
+    last = store.last_price(did)
+    if last and buy_price and abs(last.price - buy_price) >= 1:
+        print(f"价差说明：商品级记录 {money(last.price)} 来自已售罄配色，可购最低为 {money(buy_price)}")
+    return 0
+
+
+def _ensure_product(store: Store, key: str) -> tuple[Product | None, bool]:
+    """按序号 / platform:pid / URL / 裸货号找商品；找不到则尝试自动添加。"""
+    p = resolve_product(store, key)
+    if p:
+        return p, False
+    raw = (key or "").strip()
+    try:
+        platform, pid = resolve_product_url(raw)
+    except MonitorError as e:
+        print(f"无法识别商品「{key}」：{e}")
+        return None, False
+    p = Product(platform=platform, pid=pid,
+                url=_normalize_product_url(platform, pid, raw))
+    if not store.add_product(p):
+        p = store.get_product(p.display_id())
+    return p, True
+
+
 def cmd_test_notify(args, store: Store, cfg: dict) -> int:
     notifier = Notifier(cfg.get("notify"))
     enabled = notifier.enabled_channels()
@@ -981,6 +1182,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("analyze", help="历史分析 + 降价预测 + 购买建议")
     p.add_argument("key", help="序号 / platform:pid / URL")
     p.set_defaults(fn=cmd_analyze)
+
+    p = sub.add_parser("advise", help="一条命令给出购买建议：买/等/关注 + 可购价 + 叠券")
+    p.add_argument("key", help="序号 / platform:pid / URL / 裸货号（如 u0000000066172）")
+    p.add_argument("--coupons", help="券配置 JSON（缺省用内置演示券）")
+    p.set_defaults(fn=cmd_advise)
 
     p = sub.add_parser("deal", help="优惠叠加最优解计算")
     p.add_argument("--price", type=float, required=True, help="商品现价")
