@@ -1169,7 +1169,8 @@ def cmd_plan(args, store: Store, cfg: dict) -> int:
                 print(f"  依据：{size_match.note}")
 
     # ---------- 购买方案 ----------
-    print("购买方案：")
+    print("购买方案：" if args.coupons
+          else "购买方案（演示券，未计入你的个人券）：")
     if buy_price:
         try:
             rules = _load_rules(args.coupons) if args.coupons else demo_rules(p.platform)

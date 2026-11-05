@@ -1,15 +1,25 @@
 """监控器基类与公共工具。"""
 from __future__ import annotations
 
+import ssl
 import time
 
 import requests
+from requests.adapters import HTTPAdapter
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 TIMEOUT = 15
+
+
+class _SystemTrustAdapter(HTTPAdapter):
+    """用操作系统信任库做 TLS 校验（Windows 公司代理装了根证书时，certifi 会误判）。"""
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = ssl.create_default_context()
+        return super().init_poolmanager(*args, **kwargs)
 
 
 class MonitorError(RuntimeError):
@@ -52,7 +62,13 @@ class BaseMonitor:
     def http_get(url: str, **kw) -> requests.Response:
         headers = kw.pop("headers", {})
         headers.setdefault("User-Agent", DEFAULT_UA)
-        return requests.get(url, headers=headers, timeout=TIMEOUT, **kw)
+        try:
+            return requests.get(url, headers=headers, timeout=TIMEOUT, **kw)
+        except requests.exceptions.SSLError:
+            # 公司代理/杀毒软件把根证书装在系统信任库，但 requests 默认只信 certifi
+            session = requests.Session()
+            session.mount("https://", _SystemTrustAdapter())
+            return session.get(url, headers=headers, timeout=TIMEOUT, **kw)
 
     @staticmethod
     def now() -> float:
