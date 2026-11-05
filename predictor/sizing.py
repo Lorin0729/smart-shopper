@@ -35,6 +35,24 @@ TOPS: dict[str, list[dict]] = {
     ],
 }
 
+# ------------------------------------------------------------------ 裤装
+PANTS: dict[str, list[dict]] = {
+    "men": [
+        {"alpha": "S", "cn": "165/74A", "waist": (70, 76), "us": "29-30"},
+        {"alpha": "M", "cn": "170/78A", "waist": (76, 82), "us": "31-32"},
+        {"alpha": "L", "cn": "175/82A", "waist": (82, 88), "us": "33-34"},
+        {"alpha": "XL", "cn": "180/88A", "waist": (88, 94), "us": "35-36"},
+        {"alpha": "XXL", "cn": "185/94A", "waist": (94, 102), "us": "38"},
+    ],
+    "women": [
+        {"alpha": "S", "cn": "155/62A", "waist": (58, 64), "us": "25-26"},
+        {"alpha": "M", "cn": "160/66A", "waist": (64, 70), "us": "27-28"},
+        {"alpha": "L", "cn": "165/70A", "waist": (70, 76), "us": "29-30"},
+        {"alpha": "XL", "cn": "170/76A", "waist": (76, 84), "us": "31-32"},
+        {"alpha": "XXL", "cn": "175/82A", "waist": (84, 92), "us": "33-34"},
+    ],
+}
+
 # ------------------------------------------------------------------ 鞋码
 SHOES: dict[str, list[dict]] = {
     "men": [
@@ -106,6 +124,79 @@ def recommend_top(gender: str = "men", height: float | None = None,
         exact = exact and lo <= height <= hi
     note = "" if exact else "身体数据处于尺码交界，建议按实际试穿或选大一码"
     return SizeMatch(best, exact, note)
+
+
+def pants_table(gender: str = "men") -> list[dict]:
+    return PANTS[_gender(gender)]
+
+
+def recommend_pants(gender: str = "men", waist: float | None = None,
+                    height: float | None = None) -> SizeMatch:
+    """按腰围推荐裤装尺码；只给身高时取中间码。"""
+    table = pants_table(gender)
+    if waist is None and height is None:
+        raise ValueError("裤装至少提供腰围或身高")
+
+    if waist is not None:
+        def in_range(row: dict) -> bool:
+            lo, hi = row["waist"]
+            # 用半开区间避免 82cm 同时命中 M/L 两个码；最后一档包含上界
+            return lo <= waist < hi or (row is table[-1] and waist == hi)
+
+        best = min(
+            table,
+            key=lambda r: (0, 0) if in_range(r)
+            else (1, min(abs(waist - r["waist"][0]), abs(waist - r["waist"][1]))),
+        )
+        exact = in_range(best)
+    else:
+        best = table[len(table) // 2]
+        exact = False
+    note = "" if exact else "腰围处于尺码交界，建议按实际试穿或选大一码"
+    return SizeMatch(best, exact, note)
+
+
+def recommend_by_body(kind: str = "top", gender: str = "men",
+                      height: float | None = None, weight: float | None = None,
+                      waist: float | None = None,
+                      chest: float | None = None) -> SizeMatch:
+    """按身高/体重/腰围/胸围推荐尺码。
+
+    - 上衣：身高 + 胸围为主；没有胸围时用 BMI 做一档修正（体重只是辅助，不是精确量体）。
+    - 裤装：腰围为主。
+    """
+    if kind == "pants":
+        if waist is None:
+            raise ValueError("裤装推荐需要腰围（cm）")
+        return recommend_pants(gender, waist, height)
+
+    if chest is None and height is None:
+        raise ValueError("上衣推荐至少需要身高或胸围")
+
+    match = recommend_top(gender, height, chest)
+    if weight is not None and height and chest is None:
+        bmi = weight / (height / 100) ** 2
+        table = tops_table(gender)
+        idx = table.index(match.row)
+        if bmi >= 26 and idx + 1 < len(table):
+            match = SizeMatch(table[idx + 1], False,
+                              f"BMI {bmi:.1f} 偏大，按身高体重上调一码；提供胸围会更准")
+        elif bmi < 18.5 and idx > 0:
+            match = SizeMatch(table[idx - 1], False,
+                              f"BMI {bmi:.1f} 偏瘦，按身高体重下调一码；提供胸围会更准")
+        elif not match.note:
+            match.note = f"BMI {bmi:.1f}，按身高推荐；提供胸围会更准"
+    return match
+
+
+def infer_kind(name: str = "", category: str = "") -> str:
+    """从商品名/类目猜品类，用于选择尺码表。"""
+    text = f"{name or ''} {category or ''}".lower()
+    if any(k in text for k in ("鞋", "靴", "sneaker", "shoe")):
+        return "shoes"
+    if any(k in text for k in ("裤", "牛仔", "裙", "pants", "trouser", "jeans", "skirt")):
+        return "pants"
+    return "top"
 
 
 def convert_shoe(gender: str = "men", cn: float | None = None, eu: float | None = None,

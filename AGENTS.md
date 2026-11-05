@@ -13,7 +13,7 @@ python main.py init          # 生成 config.json（可选）
 python main.py list          # 查看已跟踪商品
 ```
 
-常用：`advise <货号/链接>` 一条命令出结论；`add <url> --target 500 --size M` → `check` → `sizes 1 --refresh` → `analyze 1`。
+常用：`plan <链接/编号>` 一条命令给出会员/叠券/凑单/尺码/时机；`advise <货号/链接>` 看已跟踪商品结论；`add <url> --target 500 --size M` → `check` → `sizes 1 --refresh` → `analyze 1`。
 
 ## 测试
 
@@ -28,7 +28,7 @@ python -m unittest discover -s tests
 - `main.py`：CLI 入口与子命令；`core/`：模型、SQLite、报告、尺码匹配
 - `monitors/`：`uniqlo.py`（候选接口链/重试/缓存）、`uniqlo_parse.py`（纯解析）、`jd.py`、`taobao.py`、`generic.py`、`renderer.py`
 - `optimizer/`：叠券与凑单；`predictor/`：预测与季节模型；`notifier/`：多渠道推送；`webui/`：本地面板
-- `tests/`：105 个单测，`tests/fixtures/uniqlo/` 为优衣库页面/接口样本
+- `tests/`：114 个单测，`tests/fixtures/uniqlo/` 为优衣库页面/接口样本
 
 ## 约定
 
@@ -37,5 +37,5 @@ python -m unittest discover -s tests
 - 抓取失败时如实输出诊断（已尝试哪些接口、原因、建议），不得伪造价格或库存；库存未知不要当作有货。
 - 不要删除/覆盖 `shopper.db`、`config.json`；不要把含 Cookie/密钥的配置、数据库、导出清单提交进 git。
 - 修改抓取节奏相关逻辑时保留 TTL 缓存与提醒冷却，避免对目标站点高频请求。
-- 用户问「多少钱 / 怎么买 / 值不值得等」时优先用 `advise`；结论价必须基于 `in_stock` 的 SKU，商品级历史价（可能来自售罄配色）只用于趋势，不得作为结论价。
+- 用户问「多少钱 / 怎么买 / 会员 / 凑单 / 尺码 / 值不值得等」时优先用 `plan`；已跟踪商品的单点结论用 `advise`。结论价必须基于 `in_stock` 的 SKU，商品级历史价（可能来自售罄配色）只用于趋势，不得作为结论价。
 - 优衣库商品级价格 = 全部 SKU 最低现价（含售罄配色），单 SKU 价格与库存以 `sizes` 输出为准。

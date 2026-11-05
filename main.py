@@ -7,6 +7,7 @@
   check    抓取一轮价格与库存（--watch 持续监控）
   analyze  历史分析 + 降价预测 + 购买窗口 + 购买建议
   advise   一条命令出结论：买/等/关注 + 可购价 + 叠券 + 时机
+  plan     完整购买方案：会员/叠券/凑单 + 尺码 + 往年降价时机
   history  价格历史明细与 CSV 导出
   seed     补历史价格（慢慢买 / CSV），让预测立刻可用
   chart    导出走势图（svg / html / png）
@@ -36,6 +37,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
 from datetime import date, datetime
@@ -139,6 +141,83 @@ def _describe_deal(res) -> str:
 def _trim_reason(text: str, limit: int = 25) -> str:
     text = (text or "").strip()
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _is_vip_rule(rule: DiscountRule) -> bool:
+    name = (rule.name or "").lower()
+    return any(k in name for k in ("88vip", "plus", "会员", "超级会员"))
+
+
+def _plan_product(store: Store, key: str, platform_hint: str | None,
+                  category: str | None) -> tuple[Product | None, bool]:
+    """plan 入口：链接/序号/裸编号 → 商品；裸编号必须显式指定平台。"""
+    p = resolve_product(store, key)
+    if p:
+        return p, False
+    raw = (key or "").strip()
+    if raw.isdigit():
+        if not platform_hint:
+            print(f"「{raw}」是裸编号，无法判断平台；请发商品链接，或指定 --platform jd/taobao。")
+            return None, False
+        if platform_hint == PLATFORM_UNIQLO:
+            print("优衣库编号形如 u0000000066172，不是纯数字；请发商品链接或完整编号。")
+            return None, False
+        platform, pid = platform_hint, raw
+        url = (f"https://item.jd.com/{pid}.html" if platform == "jd"
+               else f"https://item.taobao.com/item.htm?id={pid}")
+    else:
+        try:
+            platform, pid = resolve_product_url(raw)
+        except MonitorError as e:
+            print(f"无法识别商品「{key}」：{e}")
+            return None, False
+        url = _normalize_product_url(platform, pid, raw)
+    p = Product(platform=platform, pid=pid, url=url,
+                category=season.normalize_category(category or "general"))
+    if not store.add_product(p):
+        p = store.get_product(p.display_id())
+    return p, True
+
+
+def _match_size_variant(variants: list[VariantSnapshot], size_hint: str) -> VariantSnapshot | None:
+    """把推荐尺码（S/M/L 或 175/92A）匹配到商品实际 SKU。"""
+    hint = (size_hint or "").strip().upper()
+    if not hint:
+        return None
+    hits = []
+    for v in variants:
+        raw = (v.size or v.variant or "").upper()
+        tokens = {t for t in re.split(r"[\s/]+", raw) if t}
+        if hint in tokens or raw == hint or ("/" in hint and raw.startswith(hint)):
+            hits.append(v)
+    if not hits:
+        return None
+    stocked = [v for v in hits if v.in_stock]
+    return min(stocked or hits, key=lambda v: (not v.in_stock, v.price or 1e9))
+
+
+def _filler_suggestion(amount: float, rules: list[DiscountRule],
+                       max_filler: float = 150.0):
+    """满减/每满减规则下，再凑多少钱能多减多少。返回 (净收益, 规则, 差额, 多减)。"""
+    best = None
+    for r in rules:
+        if r.kind == "every_full_off" and r.step > 0:
+            if amount < r.threshold:
+                gap = r.threshold - amount
+            else:
+                gap = (int(amount // r.step) + 1) * r.step - amount
+            extra = r.value
+        elif r.kind == "full_off" and amount < r.threshold:
+            gap = r.threshold - amount
+            extra = r.value
+        else:
+            continue
+        if gap <= 0 or gap > max_filler:
+            continue
+        score = extra - gap
+        if best is None or score > best[0]:
+            best = (score, r, gap, extra)
+    return best
 
 
 def fmt_ts(ts: float) -> str:
@@ -960,6 +1039,198 @@ def _ensure_product(store: Store, key: str) -> tuple[Product | None, bool]:
     return p, True
 
 
+def cmd_plan(args, store: Store, cfg: dict) -> int:
+    """完整购买方案：当前价 → 会员/叠券/凑单 → 尺码 → 往年降价时机。"""
+    p, added = _plan_product(store, args.key, args.platform, args.category)
+    if not p:
+        return 1
+    did = p.display_id()
+    if added:
+        print(f"已自动加入跟踪：{did}")
+    if args.category:
+        cat = season.normalize_category(args.category)
+        if cat != p.category:
+            p.category = cat
+            store.update_product(p)
+
+    today = date.today()
+    now = time.time()
+    price_point, inv, variants = None, None, []
+    fetch_error = ""
+    try:
+        monitor = get_monitor(p.platform, cfg)
+        price_point, inv = monitor.fetch(p.pid)
+        variants = list(monitor.variants(p.pid) or [])
+        if getattr(monitor, "last_name", "") and not p.name:
+            p.name = monitor.last_name
+            store.update_product(p)
+    except Exception as e:  # noqa: BLE001
+        fetch_error = str(e)
+
+    if price_point:
+        store.add_price(did, price_point)
+    if inv:
+        store.add_inventory(did, inv)
+    if variants:
+        store.add_variants(did, variants)
+
+    if fetch_error:
+        print(f"[失败] {did}：{fetch_error}")
+        if not variants:
+            variants = store.latest_variants(did)
+        if price_point is None:
+            price_point = store.last_price(did)
+        if inv is None:
+            inv = store.last_inventory(did)
+        if price_point is None and not variants:
+            print("没有可用的价格/库存数据，无法给出购买方案。")
+            return 1
+        print("（以下使用上次记录的数据，结论可能滞后）")
+
+    buy_variant, buy_price = _stocked_price(variants)
+    in_stock_any = (any(v.in_stock for v in variants) if variants
+                    else (inv.in_stock if inv else None))
+    if variants and not in_stock_any:
+        buy_price = None  # 全部 SKU 售罄时不报价
+    if buy_price is None and price_point and in_stock_any is not False:
+        buy_price = price_point.price
+    if buy_price is None and in_stock_any is not False:
+        print("未能获取有效价格，无法计算购买方案。")
+        return 1
+
+    points = store.get_prices(did)
+    decision_points = list(points)
+    if buy_price and decision_points:
+        decision_points[-1] = PricePoint(decision_points[-1].ts, buy_price,
+                                         decision_points[-1].original_price)
+    hist = PriceHistory(decision_points)
+    stats = hist.stats()
+    ready = _history_ready(points)
+    profile = season.profile_of(p.category)
+    windows = season.best_buy_windows(p.category, p.launch(), today)
+    prediction = predict_drop(hist, today)
+    trend = trend_forecast(hist)
+    qty = sum(v.quantity for v in variants if v.in_stock and v.quantity is not None) or None
+    inv_for_rec = (InventorySnapshot(now, bool(in_stock_any), "有货" if in_stock_any else "无货", qty)
+                   if variants else inv)
+    rec = recommend(hist, inv_for_rec, prediction, windows, today, trend=trend)
+    in_window = next((w for w in windows if w.overlaps_today(today)), None)
+
+    if in_stock_any is False:
+        action, reason = "关注", "当前无货，等补货提醒"
+    elif p.target_price and buy_price and buy_price <= p.target_price:
+        action, reason = "买", "已到目标价"
+    elif in_window:
+        action, reason = "买", f"正处于{in_window.tag}窗口"
+    elif ready and rec.action == "建议等待":
+        action, reason = "等", "历史与大促信号显示还会降"
+    else:
+        action, reason = "买", "当前价格适合入手"
+
+    print(f"【结论】{action} — {reason}")
+    print()
+    stock_txt = ("有货" if in_stock_any else "无货") if in_stock_any is not None else "库存未知"
+    if buy_price and buy_variant:
+        price_txt = f"{money(buy_price)}（{buy_variant.variant}）"
+    else:
+        price_txt = money(buy_price) if buy_price else "无货/无价格"
+    print(f"商品：{p.name or did}  [{p.platform}]  {price_txt} · {stock_txt}")
+
+    # ---------- 尺码 ----------
+    kind = args.kind if args.kind != "auto" else sizing.infer_kind(p.name, p.category)
+    body = [("身高", args.height), ("体重", args.weight),
+            ("腰围", args.waist), ("胸围", args.chest)]
+    if not any(v is not None for _k, v in body):
+        print("尺码建议：未提供身高/体重/腰围；告诉我这三项（裤装至少腰围）可推荐尺码")
+    elif kind == "shoes":
+        print("尺码建议：鞋类请提供平时穿的码数（--cn 260 / --eu 42），身高体重无法推鞋码")
+    else:
+        try:
+            size_match = sizing.recommend_by_body(
+                kind, args.gender, args.height, args.weight, args.waist, args.chest)
+        except ValueError as e:
+            print(f"尺码建议：{e}")
+        else:
+            row = size_match.row
+            dims = " / ".join(f"{k} {v:g}" for k, v in body if v is not None)
+            print(f"尺码建议：{dims} → 推荐 {row['alpha']}"
+                  f"（中国 {row['cn']} / 美码 {row['us']}）")
+            target = _match_size_variant(variants, row["alpha"])
+            if target:
+                qty_txt = f"，剩 {target.quantity} 件" if target.quantity is not None else ""
+                price_txt = f"，{money(target.price)}" if target.price else ""
+                print(f"  商品尺码「{target.variant}」：{'有货' if target.in_stock else '无货'}"
+                      f"{qty_txt}{price_txt}")
+            elif variants:
+                print(f"  商品页没有「{row['alpha']}」这个尺码，下单前核对尺码表")
+            else:
+                print("  该平台暂无尺码库存数据，以上为通用尺码表建议")
+            if size_match.note:
+                print(f"  依据：{size_match.note}")
+
+    # ---------- 购买方案 ----------
+    print("购买方案：")
+    if buy_price:
+        try:
+            rules = _load_rules(args.coupons) if args.coupons else demo_rules(p.platform)
+        except Exception as e:  # noqa: BLE001
+            print(f"  券配置读取失败：{e}")
+            return 1
+        if p.platform == "taobao" and not any(_is_vip_rule(r) for r in rules):
+            rules = rules + [DiscountRule("vip_88_est", "88VIP 95折（估算）",
+                                         "percent", 0.95, priority=50)]
+        base_rules = [r for r in rules if not _is_vip_rule(r)]
+        vip_rules = [r for r in rules if _is_vip_rule(r)]
+        base_deal = best_price(buy_price, base_rules)
+        vip_deal = best_price(buy_price, rules)
+        print(f"  无会员：{money(base_deal.final)}（{_describe_deal(base_deal)}）")
+        if vip_rules:
+            mark = "  ← 你的方案" if args.vip else ""
+            print(f"  有会员：{money(vip_deal.final)}（{_describe_deal(vip_deal)}）{mark}")
+        else:
+            print("  会员：该平台/券包里没有会员折扣")
+        scenario_rules = rules if (args.vip and vip_rules) else base_rules
+        filler = _filler_suggestion(buy_price, scenario_rules)
+        if filler:
+            _score, rule, gap, extra = filler
+            net = gap - extra
+            net_txt = f"净多花 {money(net)}" if net > 0 else f"反而省 {money(-net)}"
+            print(f"  凑单：再凑 {money(gap)} 可多减 {money(extra)}（{rule.name}，{net_txt}）")
+        else:
+            print("  凑单：当前金额已接近档位，或再凑不划算")
+    else:
+        print("  无货/无价格，暂不计算叠券")
+
+    # ---------- 往年时机 ----------
+    print("价格时机：")
+    print(f"  往年同类（{profile.name}）：")
+    for i, w in enumerate(windows[:3], 1):
+        mark = " ← 当前" if w.overlaps_today(today) else ""
+        print(f"    {i}. [{w.tag}] {w.start} ~ {w.end}  预期 {w.expected_discount * 10:g} 折{mark}")
+    if profile.tip:
+        print(f"    {profile.tip}")
+    low = store.lowest_price(did)
+    history_txt = f"本商品：{len(points)} 次采样"
+    if low:
+        history_txt += (f" · 历史最低 {money(low.price)}"
+                        f"（{datetime.fromtimestamp(low.ts).strftime('%Y-%m-%d')}）")
+    if ready and stats:
+        history_txt += f" · 30 天内再降概率 {prediction.prob_30d:.0%}"
+        print(f"  {history_txt}")
+        if trend:
+            print(f"  趋势：{trend.describe(money)}")
+    else:
+        print(f"  {history_txt} · 样本不足，先跑几天 check 再给概率")
+
+    stamps = [x.ts for x in (price_point, inv) if x] + [v.ts for v in variants]
+    print(f"数据时间：{fmt_ts(max(stamps) if stamps else now)}")
+
+    if price_point and buy_price and abs(price_point.price - buy_price) >= 1:
+        print(f"价差说明：接口价 {money(price_point.price)}，有货最低 {money(buy_price)}"
+              "（结论以有货 SKU 为准）")
+    return 0
+
+
 def cmd_test_notify(args, store: Store, cfg: dict) -> int:
     notifier = Notifier(cfg.get("notify"))
     enabled = notifier.enabled_channels()
@@ -1187,6 +1458,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("key", help="序号 / platform:pid / URL / 裸货号（如 u0000000066172）")
     p.add_argument("--coupons", help="券配置 JSON（缺省用内置演示券）")
     p.set_defaults(fn=cmd_advise)
+
+    p = sub.add_parser("plan", help="完整购买方案：会员/叠券/凑单 + 尺码 + 往年时机")
+    p.add_argument("key", help="商品链接 / platform:pid / 序号 / 裸数字编号（需配 --platform）")
+    p.add_argument("--platform", choices=["jd", "taobao", "uniqlo"],
+                   help="裸数字编号所属平台（京东/淘宝必填，避免误判）")
+    p.add_argument("--coupons", help="券配置 JSON（缺省用内置演示券）")
+    p.add_argument("--vip", action="store_true", help="我有 88VIP / PLUS，优先展示会员方案")
+    p.add_argument("--height", type=float, help="身高 cm")
+    p.add_argument("--weight", type=float, help="体重 kg")
+    p.add_argument("--waist", type=float, help="腰围 cm（裤装必需）")
+    p.add_argument("--chest", type=float, help="胸围 cm（比体重更准）")
+    p.add_argument("--gender", choices=["men", "women"], default="men")
+    p.add_argument("--kind", choices=["auto", "top", "pants", "shoes"],
+                   default="auto", help="品类；auto 按商品名/类目推断")
+    p.add_argument("--category", help="类目：羽绒服/大衣/夏装/鞋/裤装 等")
+    p.set_defaults(fn=cmd_plan)
 
     p = sub.add_parser("deal", help="优惠叠加最优解计算")
     p.add_argument("--price", type=float, required=True, help="商品现价")

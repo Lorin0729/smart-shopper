@@ -70,9 +70,10 @@ python main.py add "https://www.uniqlo.cn/product-detail.html?productCode=u00000
 python main.py seed 1
 python main.py seed 1 --csv history.csv      # 表头 datetime,price
 
-# 4. 一条命令出结论 / 监控
-python main.py advise u0000000066172          # 买/等/关注 + 可购价 + 关注尺码 + 叠券
-python main.py advise u0000000066172 --coupons my_coupons.json
+# 4. 一条命令出购买方案 / 监控
+python main.py plan "https://item.jd.com/100012043978.html" --vip --height 178 --weight 70
+python main.py plan 478897 --platform jd --vip --waist 82   # 裸编号需指定平台
+python main.py advise u0000000066172          # 已跟踪商品：买/等/关注 + 可购价 + 关注尺码
 python main.py check                          # 抓一轮
 python main.py check --watch --interval 3600  # 持续监控
 
@@ -132,6 +133,35 @@ python main.py --currency USD analyze 1                 # 用美元展示价格
   ]
 }
 ```
+
+## 一条命令算购买方案（plan）
+
+```bash
+# 链接最稳：京东 / 淘宝天猫 / 优衣库 / 通用站点
+python main.py plan "https://item.jd.com/100012043978.html" --vip --height 178 --weight 70
+
+# 裸数字编号必须指定平台，避免误判
+python main.py plan 478897 --platform jd --vip --height 178 --weight 70 --waist 82
+
+# 有券：券文件支持顶层数组或 {"coupons": [...]}
+python main.py plan "https://item.taobao.com/item.htm?id=679876543210" \
+  --coupons my_coupons.json --vip --height 178 --weight 70
+```
+
+输出固定包含：
+
+- **结论**：买 / 等 / 关注
+- **商品与可购价**：只取有货 SKU 的最低价（售罄配色不参与）
+- **尺码建议**：按身高/体重/腰围推荐，并匹配商品实际 SKU 的库存与价格（上衣用身高+胸围/体重修正，裤装用腰围）
+- **购买方案**：无会员 / 有 88VIP（或 PLUS）两套叠券，外加「再凑多少钱能多减多少」
+- **价格时机**：往年同类商品的类目规律 + 本商品真实采样（样本不足时明确说明）
+
+注意：
+
+- 裸数字 `478897` 无法判断是京东还是淘宝，必须加 `--platform jd` 或 `--platform taobao`；品牌货号（非平台商品 ID）请直接发商品链接。
+- `--vip` 只是标记「这套会员方案是我的」，工具仍会同时算无会员/有会员两套。
+- 没有 `--coupons` 时使用演示券，会标注「未计入你的个人券」。
+- 淘宝需要 `config.json` 的 `taobao.cookie`；京东价格接口在部分公司网络/代理下可能因证书校验失败，工具会如实报错，不会编造价格。
 
 ## 输出示例
 
@@ -214,7 +244,7 @@ smart-shopper/
 ├── .github/workflows/
 │   ├── ci.yml             # 三版本 Python 跑测试
 │   └── scheduled-check.yml# 云端定时监控 + 报告 Artifact
-└── tests/                 # 105 个单元测试
+└── tests/                 # 114 个单元测试
 ```
 
 ## 配置
@@ -501,7 +531,7 @@ python main.py import-list wishlist.json --overwrite    # 覆盖本地字段
 python -m unittest discover -s tests -v
 ```
 
-105 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、趋势回归、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出、币种换算、尺码助手、监控健康度、优衣库链接识别/SKU 矩阵解析/库存合并/缓存/限流重试/多级降级、advise 可购价口径（售罄配色不参与决策）。
+114 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、趋势回归、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出、币种换算、尺码助手、监控健康度、优衣库链接识别/SKU 矩阵解析/库存合并/缓存/限流重试/多级降级、advise 可购价口径（售罄配色不参与决策）、plan 会员/凑单/尺码推荐（身高体重腰围 → 尺码）。
 
 ## Roadmap
 
