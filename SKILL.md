@@ -17,7 +17,7 @@ description: 购物购买决策助手。用户给出商品编号/链接、问「
 如果本地还没有这个 skill：
 
 ```bash
-git clone https://github.com/Wang-xinyu-2007/smart-shopper.git "$HOME/.qoder/skills/smart-shopper"
+git clone https://github.com/Lorin0729/smart-shopper.git "$HOME/.qoder/skills/smart-shopper"
 python -m pip install -r "$HOME/.qoder/skills/smart-shopper/requirements.txt"
 ```
 

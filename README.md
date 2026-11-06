@@ -43,12 +43,12 @@
 
 把下面这句话发给支持 skill 的 Agent，它就能自己找到仓库、clone、装依赖，然后按 `SKILL.md` 开始工作：
 
-> 安装并使用这个 skill：https://github.com/Wang-xinyu-2007/smart-shopper
+> 安装并使用这个 skill：https://github.com/Lorin0729/smart-shopper
 
 Agent 需要执行的安装动作：
 
 ```bash
-git clone https://github.com/Wang-xinyu-2007/smart-shopper.git "$HOME/.qoder/skills/smart-shopper"
+git clone https://github.com/Lorin0729/smart-shopper.git "$HOME/.qoder/skills/smart-shopper"
 python -m pip install -r "$HOME/.qoder/skills/smart-shopper/requirements.txt"
 ```
 
