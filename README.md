@@ -39,6 +39,28 @@
 - 自包含 HTML 报告：价格曲线 + 统计 + 预测 + 季节窗口，一个文件可直接分享
 - 第三方历史价冷启动（慢慢买）或 CSV 导入，新商品添加即拥有历史数据
 
+## 作为 Agent Skill 安装（一句话）
+
+把下面这句话发给支持 skill 的 Agent，它就能自己找到仓库、clone、装依赖，然后按 `SKILL.md` 开始工作：
+
+> 安装并使用这个 skill：https://github.com/Wang-xinyu-2007/smart-shopper
+
+Agent 需要执行的安装动作：
+
+```bash
+git clone https://github.com/Wang-xinyu-2007/smart-shopper.git "$HOME/.qoder/skills/smart-shopper"
+python -m pip install -r "$HOME/.qoder/skills/smart-shopper/requirements.txt"
+```
+
+| 使用场景 | 克隆到哪里 |
+|---|---|
+| Qoder 用户级 | `$HOME/.qoder/skills/smart-shopper` |
+| Qoder 项目级 | `<项目>/.qoder/skills/smart-shopper` |
+| QoderWork | `$HOME/.qoderwork/skills/smart-shopper` |
+| Claude Code / 其他 Agent | 对应 skills 目录，或任意目录后直接读 `SKILL.md` |
+
+仓库根目录的 `SKILL.md` 就是技能说明书（触发词、固定流程、输出模板、失败处理）。不需要额外打包或上传 zip。
+
 ## 一键开始
 
 ```bash

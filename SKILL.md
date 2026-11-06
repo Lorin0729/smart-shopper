@@ -7,10 +7,24 @@ description: 购物购买决策助手。用户给出商品编号/链接、问「
 
 先定位本文件所在目录，记作 `<skill_dir>`。
 
-- 若 `<skill_dir>` 下存在 `app\` 子目录（WorkBuddy 安装形态）：命令在 `<skill_dir>\app` 下执行。
-- 否则（直接使用仓库）：在 `<skill_dir>` 下执行。
+- 若 `<skill_dir>` 下存在 `app\` 子目录：命令在 `<skill_dir>\app` 下执行。
+- 否则（直接克隆仓库）：在 `<skill_dir>` 下执行。
 
 不要写死绝对路径。统一使用 `python main.py plan ...`。
+
+## 安装（首次使用）
+
+如果本地还没有这个 skill：
+
+```bash
+git clone https://github.com/Wang-xinyu-2007/smart-shopper.git "$HOME/.qoder/skills/smart-shopper"
+python -m pip install -r "$HOME/.qoder/skills/smart-shopper/requirements.txt"
+```
+
+- Qoder 用户级：`$HOME/.qoder/skills/smart-shopper`
+- Qoder 项目级：`<项目>/.qoder/skills/smart-shopper`
+- QoderWork：`$HOME/.qoderwork/skills/smart-shopper`
+- 其他 Agent：克隆到任意目录，按本文件执行即可
 
 ## 什么时候用
 
@@ -141,5 +155,5 @@ python main.py serve --port 8777
 ## 环境
 
 - 依赖：`python -m pip install -r requirements.txt`（只有 requests）。
-- 配置：`app` 根目录 `config.json`（skill 形态数据库指向 `data/shopper.db`）；也可 `--config` 或 `SMART_SHOPPER_CONFIG`。
-- 不要删除/覆盖 `data/shopper.db`；不要把含 Cookie/密钥的 `config.json` 提交进 git。
+- 配置：代码根目录的 `config.json`（默认数据库 `shopper.db`；也可 `--config` 或 `SMART_SHOPPER_CONFIG` 覆盖）。
+- 不要删除/覆盖用户的 `shopper.db`；不要把含 Cookie/密钥的 `config.json` 提交进 git。
