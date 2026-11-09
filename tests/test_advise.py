@@ -46,12 +46,12 @@ class TestAdvise(unittest.TestCase):
         self.store.conn.close()
         self.tmp.cleanup()
 
-    def _run(self, variants, coupons=None):
+    def _run(self, variants, coupons=None, demo=False):
         buf = io.StringIO()
         with mock.patch("main.get_monitor", return_value=FakeMonitor(variants)), \
                 redirect_stdout(buf):
             code = main.cmd_advise(
-                SimpleNamespace(key=PID, coupons=coupons), self.store, {})
+                SimpleNamespace(key=PID, coupons=coupons, demo=demo), self.store, {})
         return code, buf.getvalue()
 
     def test_partial_soldout_uses_in_stock_price(self):
@@ -62,13 +62,13 @@ class TestAdvise(unittest.TestCase):
             _variant("黑色", "M", 799, True, 3),
         ]
         self.store.add_price(self.did, PricePoint(time.time() - 3600, 699.0))
-        code, out = self._run(variants)
+        code, out = self._run(variants, demo=True)
         self.assertEqual(code, 0)
         self.assertIn("可购最低价：¥799（乳白色 / M）", out)
         self.assertIn("你关注的「乳白色 M」：¥799 · 有货，剩 9 件", out)
         self.assertIn("目标价 ¥599：还差 ¥200（需再降 25%）", out)
         self.assertIn("叠券后估算：¥749", out)
-        self.assertIn("未计入你的个人券", out)
+        self.assertIn("演示券", out)
         self.assertNotIn("可购最低价：¥699", out)
         self.assertIn("价差说明", out)
 
@@ -112,7 +112,7 @@ class TestAdvise(unittest.TestCase):
         with mock.patch("main.get_monitor", return_value=FakeMonitor(variants)), \
                 redirect_stdout(buf):
             code = main.cmd_advise(
-                SimpleNamespace(key=PID, coupons=None), other, {})
+                SimpleNamespace(key=PID, coupons=None, demo=False), other, {})
         out = buf.getvalue()
         self.assertEqual(code, 0)
         self.assertIn("已自动加入跟踪", out)

@@ -1124,14 +1124,16 @@ def cmd_advise(args, store: Store, cfg: dict) -> int:
 
     if buy_price:
         user_rules = bool(args.coupons)
+        demo = getattr(args, "demo", False)
         try:
-            rules = _load_rules(args.coupons) if user_rules else demo_rules(p.platform)
+            rules = _load_rules(args.coupons) if user_rules else (
+                demo_rules(p.platform) if demo else [])
         except Exception as e:  # noqa: BLE001
             print(f"券配置读取失败：{e}")
             return 1
         deal = best_price(buy_price, rules)
-        detail = _describe_deal(deal) + ("" if user_rules else " · 未计入你的个人券")
-        print(f"叠券后估算：{money(deal.final)}（{detail}）")
+        suffix = "" if user_rules else (" · 演示券" if demo else " · 未提供券，按 0 券计算")
+        print(f"叠券后估算：{money(deal.final)}（{_describe_deal(deal)}{suffix}）")
 
     if ready and stats:
         print(f"价格位置：历史 {stats.percentile:.0%} 分位 · 30 天内再降概率 {prediction.prob_30d:.0%}")
@@ -1622,7 +1624,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("advise", help="一条命令给出购买建议：买/等/关注 + 可购价 + 叠券")
     p.add_argument("key", help="序号 / platform:pid / URL / 裸货号（如 u0000000066172）")
-    p.add_argument("--coupons", help="券配置 JSON（缺省用内置演示券）")
+    p.add_argument("--coupons", help="券配置 JSON（缺省按 0 券计算）")
+    p.add_argument("--demo", action="store_true", help="使用内置演示券（会标注估算）")
     p.set_defaults(fn=cmd_advise)
 
     p = sub.add_parser("plan", help="完整购买方案：会员/叠券/凑单 + 尺码 + 往年时机")
