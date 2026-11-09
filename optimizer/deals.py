@@ -31,6 +31,8 @@ class DiscountRule:
     store: str | None = None        # 限定店铺（购物车模式）
     enabled: bool = True
     note: str = ""
+    source: str = "calculated"  # checkout_verified / calculated / estimated
+    valid_to: str = ""          # 券有效期（ISO 日期），空表示未知
 
     @staticmethod
     def from_dict(d: dict) -> "DiscountRule":
@@ -215,9 +217,9 @@ def optimize_cart(items: list[CartItem], rules: list[DiscountRule]) -> dict:
 
 # ------------------------------------------------------------------ 内置示例
 def demo_rules(platform: str = "taobao") -> list[DiscountRule]:
-    """一组典型大促券，用于 deal --demo 演示。"""
+    """一组典型大促券，仅用于演示；source=estimated，不得当作真实优惠。"""
     if platform == "jd":
-        return [
+        return _estimated([
             DiscountRule("jd_plus", "PLUS会员95折", "percent", 0.95, priority=10),
             DiscountRule("jd_item", "单品直降", "fixed", 30, priority=20),
             DiscountRule("jd_store1", "店铺东券 满399减60", "full_off", 60, 399, stack_group="store", priority=30),
@@ -225,14 +227,14 @@ def demo_rules(platform: str = "taobao") -> list[DiscountRule]:
             DiscountRule("jd_cross", "跨店满减 每299减50", "every_full_off", 50, threshold=299, step=299, priority=40),
             DiscountRule("jd_red", "平台红包", "fixed", 20, priority=50),
             DiscountRule("jd_bean", "京豆抵扣(上限2%)", "points", 15, max_off=0.02, priority=60),
-        ]
+        ])
     if platform == "uniqlo":
         # 演示券：优衣库没有淘宝式跨店满减，这里只放一条平台满减占位。
         # 真实店铺券/会员券请用 `advise --coupons` 传入，避免把演示价当成交价。
-        return [
+        return _estimated([
             DiscountRule("uni_cross", "跨店满减 300-50", "full_off", 50, 300, priority=40),
-        ]
-    return [
+        ])
+    return _estimated([
         DiscountRule("tb_item", "单品优惠", "fixed", 25, priority=20),
         DiscountRule("tb_store1", "店铺券 满300减50", "full_off", 50, 300, stack_group="store", priority=30),
         DiscountRule("tb_store2", "店铺券 满200减20", "full_off", 20, 200, stack_group="store", priority=31),
@@ -240,4 +242,10 @@ def demo_rules(platform: str = "taobao") -> list[DiscountRule]:
         DiscountRule("tb_vip", "88VIP 95折", "percent", 0.95, priority=50),
         DiscountRule("tb_red", "大促红包", "fixed", 18, priority=55),
         DiscountRule("tb_coin", "淘金币抵扣(上限1%)", "points", 10, max_off=0.01, priority=60),
-    ]
+    ])
+
+
+def _estimated(rules: list[DiscountRule]) -> list[DiscountRule]:
+    for rule in rules:
+        rule.source = "estimated"
+    return rules

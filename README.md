@@ -48,14 +48,20 @@
 Agent 需要执行的安装动作：
 
 ```bash
+# Qoder 国内版（.qoder-cn）
+git clone https://github.com/Lorin0729/smart-shopper.git "$HOME/.qoder-cn/skills/smart-shopper"
+python -m pip install -r "$HOME/.qoder-cn/skills/smart-shopper/requirements.txt"
+
+# Qoder 国际版（.qoder）
 git clone https://github.com/Lorin0729/smart-shopper.git "$HOME/.qoder/skills/smart-shopper"
 python -m pip install -r "$HOME/.qoder/skills/smart-shopper/requirements.txt"
 ```
 
 | 使用场景 | 克隆到哪里 |
 |---|---|
-| Qoder 用户级 | `$HOME/.qoder/skills/smart-shopper` |
-| Qoder 项目级 | `<项目>/.qoder/skills/smart-shopper` |
+| Qoder 国内版用户级 | `$HOME/.qoder-cn/skills/smart-shopper` |
+| Qoder 国际版用户级 | `$HOME/.qoder/skills/smart-shopper` |
+| Qoder 项目级 | `<项目>/.qoder/skills/smart-shopper` 或 `<项目>/.qoder-cn/skills/smart-shopper` |
 | QoderWork | `$HOME/.qoderwork/skills/smart-shopper` |
 | Claude Code / 其他 Agent | 对应 skills 目录，或任意目录后直接读 `SKILL.md` |
 
@@ -95,6 +101,8 @@ python main.py seed 1 --csv history.csv      # 表头 datetime,price
 # 4. 一条命令出购买方案 / 监控
 python main.py plan "https://item.jd.com/100012043978.html" --vip --height 178 --weight 70
 python main.py plan 478897 --platform jd --vip --waist 82   # 裸编号需指定平台
+python main.py plan "https://item.jd.com/100012043978.html" --brief  # 3 行：结论+实付+时效
+python main.py plan "https://item.jd.com/100012043978.html" --price 399  # 手动价，断网时用
 python main.py advise u0000000066172          # 已跟踪商品：买/等/关注 + 可购价 + 关注尺码
 python main.py check                          # 抓一轮
 python main.py check --watch --interval 3600  # 持续监控
@@ -108,7 +116,9 @@ python main.py history 1 --days 30 --csv price_log.csv
 python main.py serve                          # 本地 Web 面板 http://127.0.0.1:8777
 
 # 6. 省钱计算
-python main.py deal --price 899 --platform jd           # 单品叠券 TOP3
+python main.py deal --price 899 --platform jd --coupons my_coupons.json
+python main.py deal --price 899 --platform jd --demo    # 演示券（会标注估算）
+python main.py return --order order.json --return 486885 --rule uniqlo  # 凑单退货净价
 python main.py cart cart.json                           # 购物车跨店凑单
 python main.py bundle --filler-max 150                  # 已跟踪商品组合购买
 python main.py bundle --file bundle.json                # 自定义组合
@@ -133,13 +143,15 @@ python main.py --currency USD analyze 1                 # 用美元展示价格
 
 ```json
 [
-  {"rid": "shop1", "name": "店铺券 满300减50", "kind": "full_off", "value": 50, "threshold": 300, "stack_group": "store"},
+  {"rid": "shop1", "name": "店铺券 满300减50", "kind": "full_off", "value": 50, "threshold": 300, "stack_group": "store", "source": "checkout_verified", "valid_to": "2026-11-12"},
   {"rid": "cross", "name": "跨店每满300减50", "kind": "every_full_off", "value": 50, "threshold": 300, "step": 300},
   {"rid": "vip", "name": "88VIP 95折", "kind": "percent", "value": 0.95},
   {"rid": "red", "name": "红包", "kind": "fixed", "value": 18},
   {"rid": "bean", "name": "淘金币", "kind": "points", "value": 10, "max_off": 0.01}
 ]
 ```
+
+`source` 可选 `checkout_verified`（结算页实测）/ `calculated`（按规则计算）/ `estimated`（估算）；`valid_to` 为券有效期。没有来源的券会按 `calculated` 处理，不会被说成「结算页实测」。
 
 `cart.json` / `bundle.json`（含商品与店铺）：
 
@@ -182,8 +194,31 @@ python main.py plan "https://item.taobao.com/item.htm?id=679876543210" \
 
 - 裸数字 `478897` 无法判断是京东还是淘宝，必须加 `--platform jd` 或 `--platform taobao`；品牌货号（非平台商品 ID）请直接发商品链接。
 - `--vip` 只是标记「这套会员方案是我的」，工具仍会同时算无会员/有会员两套。
-- 没有 `--coupons` 时使用演示券，会标注「未计入你的个人券」。
+- **没有 `--coupons` 时按 0 券计算，不会出现任何满减金额**；只会额外给一条标注「估算」的会员折扣。要演示券请加 `--demo`。
+- 抓取失败或登录墙时用 `--price 399` 手动传价，输出会标注「手动价（未验证）」；时效用 `--deadline` / `--coupon-valid-to` / `--price-protection` 补。
 - 淘宝需要 `config.json` 的 `taobao.cookie`；京东旧价格接口在部分网络会 404 或证书校验失败，已自动降级到移动端商品页取价格/库存（实测可用）。
+
+## 凑单退货净价（return）
+
+```bash
+python main.py return --order order.json --return 486885 --rule uniqlo
+```
+
+`order.json`：
+
+```json
+{
+  "items": [
+    {"sku": "489482", "name": "茄克", "price": 399, "qty": 2},
+    {"sku": "486885", "name": "袜子", "price": 20, "qty": 1}
+  ],
+  "coupon": {"name": "满800减80", "amount": 80, "threshold": 800},
+  "paid": 738,
+  "rule": "full_clawback"
+}
+```
+
+输出退货项已付、预计退款、保留商品实际成本、券扣回方式与风险。`--rule` 支持 `proportional`（按比例退券）/ `full_clawback`（退货后低于门槛整张扣回）/ `unknown`（两种情景都列出）/ `uniqlo`（等同 `full_clawback`）。规则未知时工具不会猜，会明确提示「以退货页预计退款为准」。
 
 ## 输出示例
 
@@ -266,7 +301,7 @@ smart-shopper/
 ├── .github/workflows/
 │   ├── ci.yml             # 三版本 Python 跑测试
 │   └── scheduled-check.yml# 云端定时监控 + 报告 Artifact
-└── tests/                 # 119 个单元测试
+└── tests/                 # 134 个单元测试
 ```
 
 ## 配置
@@ -553,7 +588,7 @@ python main.py import-list wishlist.json --overwrite    # 覆盖本地字段
 python -m unittest discover -s tests -v
 ```
 
-119 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、趋势回归、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出、币种换算、尺码助手、监控健康度、优衣库链接识别/SKU 矩阵解析/库存合并/缓存/限流重试/多级降级、advise 可购价口径（售罄配色不参与决策）、plan 会员/凑单/尺码推荐（身高体重腰围 → 尺码）、京东移动端价格/库存兜底解析。
+134 个单元测试，覆盖：叠券数学与互斥组、组合凑单、季节窗口、降价预测与建议、趋势回归、走势图/报告渲染、CSV 导入、SQLite 迁移、尺码存储、提醒冷却、通用站点正则解析、Web 面板数据、清单导入导出、币种换算、尺码助手、监控健康度、优衣库链接识别/SKU 矩阵解析/库存合并/缓存/限流重试/多级降级、advise 可购价口径（售罄配色不参与决策）、plan 会员/凑单/尺码推荐（身高体重腰围 → 尺码）、京东移动端价格/库存兜底解析、deal 无券 fail-closed、凑单退货净价（按比例/整张扣回）。
 
 ## Roadmap
 

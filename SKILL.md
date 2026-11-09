@@ -17,14 +17,28 @@ description: 购物购买决策助手。用户给出商品编号/链接、问「
 如果本地还没有这个 skill：
 
 ```bash
+# Qoder 国内版（.qoder-cn）
+git clone https://github.com/Lorin0729/smart-shopper.git "$HOME/.qoder-cn/skills/smart-shopper"
+python -m pip install -r "$HOME/.qoder-cn/skills/smart-shopper/requirements.txt"
+
+# Qoder 国际版（.qoder）
 git clone https://github.com/Lorin0729/smart-shopper.git "$HOME/.qoder/skills/smart-shopper"
 python -m pip install -r "$HOME/.qoder/skills/smart-shopper/requirements.txt"
 ```
 
-- Qoder 用户级：`$HOME/.qoder/skills/smart-shopper`
-- Qoder 项目级：`<项目>/.qoder/skills/smart-shopper`
+- Qoder 国内版：`$HOME/.qoder-cn/skills/smart-shopper`
+- Qoder 国际版：`$HOME/.qoder/skills/smart-shopper`
+- Qoder 项目级：`<项目>/.qoder/skills/smart-shopper` 或 `<项目>/.qoder-cn/skills/smart-shopper`
 - QoderWork：`$HOME/.qoderwork/skills/smart-shopper`
 - 其他 Agent：克隆到任意目录，按本文件执行即可
+
+## 操作红线（必须遵守）
+
+- **不代提交订单、不代付款**；购物车默认只读，改动前必须得到明确授权。
+- **不读取、不转述订单页的姓名、电话、地址**等个人信息。
+- **不把 Cookie 发到聊天或外部服务**；只能写入本地 `config.json`。
+- 涉及「买凑单品再退货」的方案，**先确认券的退回规则**，再给净价；不要先给结论再补风险。
+- 抓取失败就如实说明，不编造价格、库存或优惠。
 
 ## 什么时候用
 
@@ -52,48 +66,65 @@ python -m pip install -r "$HOME/.qoder/skills/smart-shopper/requirements.txt"
 
 拿得到商品后，**合并成一条消息**问用户（不要连问好几轮）：
 
-> 为了算准，回我三件事：① 有 88VIP / PLUS 会员吗？② 手上有店铺券/平台券吗（面额 + 门槛）？③ 要推荐尺码的话，给我身高/体重/腰围（裤装必须腰围）。
+> 为了算准，回我四件事：① 有 88VIP / PLUS 会员吗？② 手上有哪些券（面额 + 门槛 + 有效期）？③ 买几件、预算上限、能否接受「凑单后再退货」？④ 要推荐尺码的话，给我身高/体重/腰围（裤装必须腰围）。
 
-用户已经说过的信息不要重复问。拿到后执行：
+用户已经说过的信息不要重复问。**不要默认买 2 件**，也不要默认接受囤货/退货。拿到后执行：
 
 ```bash
 python main.py plan "<商品链接>" \
   --vip \
   --coupons my_coupons.json \
-  --height 178 --weight 70 --waist 82
+  --height 178 --weight 70 --waist 82 \
+  --coupon-valid-to 2026-11-12 --deadline 2026-11-12
 ```
 
-- 没有会员：不加 `--vip`（工具仍会同时算「无会员」和「有会员」两套，`--vip` 只是标记哪套是你的）。
-- 没有券：不加 `--coupons`，会在结果里标注「未计入你的个人券」。
-- 只要买法不要尺码：省略身高/体重/腰围。
-- 裸数字：加 `--platform jd` 或 `--platform taobao`。
+- 用户催「一句话」时加 `--brief`：只输出 3 行（结论 + 实付 + 时效）。
+- 断网/登录墙/抓取失败时，用 Qoder 内置浏览器**只读**打开商品页，读出价格后：
+  ```bash
+  python main.py plan "<商品链接>" --price 399 --coupons my_coupons.json
+  ```
+  输出会标注「手动价（未验证）」。
+- 没有券：不加 `--coupons`，工具按 0 券计算，只会额外给一条标注「估算」的会员折扣。
+- 要演示券：加 `--demo`（输出会标注「演示券」）。
 
 ### 3. 按固定模板转述
 
 ```
 【结论】买 / 等 / 关注 — 一句话理由
 
-商品：测试羽绒服  [taobao]  ¥899（有货）
+商品：测试羽绒服  [taobao]  ¥899（有货）· 实时抓取
 尺码建议：身高 178 / 体重 70 → 推荐 L（中国 175/92A / 美码 42-44）
   商品尺码「乳白色 / L」：有货，剩 6 件，¥899
 
-购买方案：
-  无会员：¥699（单品优惠 + 店铺券 + 跨店满减 + 红包）
-  有 88VIP：¥663（88VIP 95折 + 店铺券 + 跨店满减 + 红包）  ← 你的方案
+购买方案（你的券）：
+  无会员：¥849（店铺券 满500减50（结算页实测））
+  有 88VIP：¥806（88VIP 95折（估算） + 店铺券 满500减50（结算页实测））  ← 你的方案
   凑单：再凑 ¥101 可多减 ¥50（跨店满减，净多花 ¥51）
 
 价格时机：
   往年同类（羽绒服）：2~3 月季末清仓约 6.5 折；双11 首个深折扣
   本商品：1 次采样，样本不足；先跑几天 check 再给概率
-数据时间：2026-11-05 21:30
+数据时间：2026-11-09 21:30
+时效：券至 2026-11-12 · 活动至 2026-11-12 · 价保 30天
+```
+
+一句话模式（`--brief`）固定 3 行：
+
+```
+【结论】买 — 正处于双11窗口
+实付：无会员 ¥899 / 有会员 ¥854（无券）
+时效：数据 2026-11-09 11:00 · 券/活动截止未提供
 ```
 
 规则：
 
 - 第一行必须是**动作**，不是数据。
+- **没传 `--coupons` 时不得出现任何满减金额**；只能给原价 + 一条标注「估算」的会员折扣。
+- 每条优惠必须带来源：`结算页实测` / `估算`；没来源的券不进入计算。
 - 「无会员」「有会员」两套都要给；只有一套时才省略另一套。
+- 商品行必须带价格来源：`实时抓取` / `手动价（未验证）` / `上次记录（可能滞后）` / `抓取失败`。
 - 售罄 SKU 不得进入可购价。
-- 明细不刷屏，用户追问再展开。
+- 明细不刷屏，用户追问再展开；用户催「一句话」直接用 `--brief`。
 
 ## 价格口径红线（必须遵守）
 
@@ -121,6 +152,33 @@ python main.py plan "<商品链接>" \
 - 用户没给身体数据时，不要硬猜，输出「未提供身高/体重/腰围」并提示补三项。
 - 身体数据只用于本次计算，不写入数据库。
 
+## 凑单退货测算（return）
+
+用户问「买袜子凑满减再退掉，实际花多少」时，**先问清券的退回规则**，再用：
+
+```bash
+python main.py return --order order.json --return 486885 --rule uniqlo
+```
+
+`order.json` 格式：
+
+```json
+{
+  "items": [
+    {"sku": "489482", "name": "茄克", "price": 399, "qty": 2},
+    {"sku": "486885", "name": "袜子", "price": 20, "qty": 1}
+  ],
+  "coupon": {"name": "满800减80", "amount": 80, "threshold": 800},
+  "paid": 738,
+  "rule": "full_clawback"
+}
+```
+
+- `--rule uniqlo` 等同 `full_clawback`；也可用 `proportional` / `unknown`。
+- 规则未知时**不要猜**：工具会同时列出「按比例退券」和「整张券扣回」两种情景，并提示以退货页预计退款为准。
+- 输出包含：退货项已付、预计退款、保留商品实际成本、券扣回方式、风险提示。
+- 结论优先一句：「不要为优惠买不需要的东西再退；直接买需要的商品通常更干净。」
+
 ## 商品标识与平台
 
 | 形式 | 用法 |
@@ -134,23 +192,28 @@ python main.py plan "<商品链接>" \
 ## 失败与降级
 
 - 京东旧价格接口（p.3.cn）在部分网络会 404 或证书校验失败，工具会自动改用移动端商品页 `item.m.jd.com` 的内嵌 JSON 取价格与库存；两者都失败才报错。
-- 淘宝未配置 Cookie 时会明确提示（无 Cookie 基本取不到价格）；不要让用户反复重试。
+- 淘宝未配置 Cookie 时会明确提示（无 Cookie 基本取不到价格）；不要让用户反复重试。若 Qoder 内置浏览器已登录，可用**浏览器只读**打开商品页读价格/券，再 `plan <链接> --price <价格> --coupons ...`，并标注「浏览器实测/手动价」。
 - 优衣库 403 会降级到页面解析；429/5xx 自动退避重试。仍失败就说明被限流，建议稍后再试或填 `uniqlo.cookie`。
 - 任何平台失败都会打印 `[失败] ...`；若有上次记录，会标注「以下使用上次记录的数据，结论可能滞后」，照实转述，**不要编造价格**。
+- 永远**不要读取订单页的姓名/电话/地址**，也不要代提交订单或代付款。
 
 ## 追问时才用的命令
 
 ```bash
 python main.py sizes 1 --refresh          # 完整颜色×尺码明细
 python main.py analyze 1                  # 详细历史 / 概率 / 购买窗口
+python main.py plan "<链接>" --brief       # 一句话：结论 + 实付 + 时效
+python main.py plan "<链接>" --price 399   # 手动价（未验证），断网/登录墙时用
 python main.py deal --price 899 --platform jd --coupons my_coupons.json
+python main.py deal --price 899 --platform jd --demo   # 演示券（会标注估算）
+python main.py return --order order.json --return 486885 --rule uniqlo
 python main.py cart cart.json             # 多商品跨店凑单
 python main.py bundle --file bundle.json  # 已跟踪商品组合购买
 python main.py check --watch --interval 3600
 python main.py serve --port 8777
 ```
 
-券文件支持顶层数组或 `{"coupons": [...]}`；券种 `full_off` / `every_full_off` / `percent` / `fixed` / `points`。
+券文件支持顶层数组或 `{"coupons": [...]}`；券种 `full_off` / `every_full_off` / `percent` / `fixed` / `points`。建议每条券带 `source`（`checkout_verified` / `calculated` / `estimated`）和 `valid_to`；没有来源的券不得当作真实优惠。
 
 ## 环境
 

@@ -28,7 +28,7 @@ python -m unittest discover -s tests
 - `main.py`：CLI 入口与子命令；`core/`：模型、SQLite、报告、尺码匹配
 - `monitors/`：`uniqlo.py`（候选接口链/重试/缓存）、`uniqlo_parse.py`（纯解析）、`jd.py`（旧价格接口 + 移动端页面兜底）、`taobao.py`、`generic.py`、`renderer.py`
 - `optimizer/`：叠券与凑单；`predictor/`：预测与季节模型；`notifier/`：多渠道推送；`webui/`：本地面板
-- `tests/`：119 个单测，`tests/fixtures/` 含优衣库页面/接口样本与京东移动端页面样本
+- `tests/`：134 个单测，`tests/fixtures/` 含优衣库页面/接口样本与京东移动端页面样本
 
 ## 约定
 

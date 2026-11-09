@@ -14,6 +14,7 @@
   report   生成自包含 HTML 分析报告
   deal     单品叠券最优解（TOP3 方案）
   cart     购物车跨店凑单优化（JSON）
+  return   凑单后退货净价测算（按比例退券 / 整张扣回 / 规则未知）
   bundle   多商品组合购买：怎么凑单最划算
   sizes    查看/刷新尺码库存
   fit      尺码换算助手（字母码 / 鞋码）
@@ -128,13 +129,17 @@ def _history_ready(points: list[PricePoint]) -> bool:
     return len(points) >= 3 and (points[-1].ts - points[0].ts) >= 3 * 86400
 
 
+def _rule_label(rule: DiscountRule, times: int | None = None) -> str:
+    name = f"{rule.name} ×{times}" if times else rule.name
+    tag = {"estimated": "估算", "checkout_verified": "结算页实测"}.get(rule.source, "")
+    return f"{name}（{tag}）" if tag else name
+
+
 def _describe_deal(res) -> str:
     parts = []
     for rule, before, _after in res.applied:
-        if rule.kind == "every_full_off" and rule.step:
-            parts.append(f"{rule.name} ×{int(before // rule.step)}")
-        else:
-            parts.append(rule.name)
+        times = int(before // rule.step) if rule.kind == "every_full_off" and rule.step else None
+        parts.append(_rule_label(rule, times))
     return " + ".join(parts) or "无可用优惠"
 
 
@@ -218,6 +223,20 @@ def _filler_suggestion(amount: float, rules: list[DiscountRule],
         if best is None or score > best[0]:
             best = (score, r, gap, extra)
     return best
+
+
+def _timing_text(args) -> str:
+    parts = []
+    coupon_valid_to = getattr(args, "coupon_valid_to", "")
+    deadline = getattr(args, "deadline", "")
+    price_protection = getattr(args, "price_protection", "")
+    if coupon_valid_to:
+        parts.append(f"券至 {coupon_valid_to}")
+    if deadline:
+        parts.append(f"活动至 {deadline}")
+    if price_protection:
+        parts.append(f"价保 {price_protection}")
+    return " · ".join(parts)
 
 
 def fmt_ts(ts: float) -> str:
@@ -559,15 +578,118 @@ def cmd_analyze(args, store: Store, cfg: dict) -> int:
 
 
 def cmd_deal(args, store: Store, cfg: dict) -> int:
-    rules = _load_rules(args.coupons) if args.coupons else demo_rules(args.platform)
+    if args.coupons:
+        try:
+            rules = _load_rules(args.coupons)
+        except Exception as e:  # noqa: BLE001
+            print(f"券配置读取失败：{e}（不做估算，直接报错）")
+            return 1
+    elif args.demo:
+        rules = demo_rules(args.platform)
+    else:
+        rules = []
+    if not rules:
+        print(f"¥{args.price:g} 未提供券（--coupons），按 0 券计算："
+              f"到手 ¥{args.price:.2f}（未计入任何优惠）")
+        return 0
+    if any(r.source == "estimated" for r in rules):
+        print("注意：含演示/估算券，实际以结算页为准。")
     results = best_deal(args.price, rules, top_n=3)
     plat_name = {"taobao": "淘宝", "jd": "京东", "uniqlo": "优衣库"}.get(args.platform, args.platform)
     print(f"¥{args.price:g} 在 {plat_name} 的最优叠券方案 TOP3：")
     for i, res in enumerate(results, 1):
-        used = " + ".join(r.name for r, _b, _a in res.applied) or "（无可用优惠）"
+        used = " + ".join(_rule_label(r) for r, _b, _a in res.applied) or "（无可用优惠）"
         print(f"\n#{i}  到手 ¥{res.final:.2f}（省 ¥{res.saved:.2f}）  叠加：{used}")
         if i == 1:
             print(res.breakdown())
+    return 0
+
+
+def cmd_return(args, store: Store, cfg: dict) -> int:
+    """凑单后退货净价测算：按比例退券 / 整张券扣回 / 规则未知。"""
+    try:
+        data = json.loads(Path(args.order).read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        print(f"订单文件读取失败：{e}")
+        return 1
+    items = []
+    for raw in data.get("items") or []:
+        try:
+            price = float(raw.get("price") or 0)
+            qty = int(raw.get("qty") or 1)
+        except (TypeError, ValueError):
+            continue
+        if price > 0 and qty > 0:
+            items.append({
+                "sku": str(raw.get("sku") or raw.get("id") or ""),
+                "name": raw.get("name") or raw.get("sku") or "商品",
+                "price": price, "qty": qty,
+            })
+    if not items:
+        print("订单文件里没有有效的 items（需要 sku/name/price/qty）。")
+        return 1
+
+    subtotal = round(sum(i["price"] * i["qty"] for i in items), 2)
+    coupon = data.get("coupon") or {}
+    coupon_amount = float(coupon.get("amount") or coupon.get("off") or 0)
+    threshold = float(coupon.get("threshold") or 0)
+    if coupon_amount and threshold and subtotal < threshold:
+        coupon_amount = 0.0  # 门槛未满足，券本来就没生效
+    paid = data.get("paid")
+    paid = float(paid) if paid is not None else round(subtotal - coupon_amount, 2)
+    discount = round(subtotal - paid, 2)
+
+    target = next((i for i in items if i["sku"] == args.return_sku), None)
+    if not target:
+        print(f"订单里找不到退货 SKU：{args.return_sku}")
+        return 1
+    qty = args.qty if args.qty and args.qty > 0 else 1
+    if qty > target["qty"]:
+        print(f"退货数量 {qty} 超过订单数量 {target['qty']}")
+        return 1
+    returned = round(target["price"] * qty, 2)
+    retained = round(subtotal - returned, 2)
+    proportional = round(paid * returned / subtotal, 2) if subtotal else 0.0
+
+    rule = args.rule or data.get("rule") or "unknown"
+    if rule == "uniqlo":
+        rule = "full_clawback"
+
+    print(f"订单：{len(items)} 项，合计 ¥{subtotal:.2f}，优惠 ¥{discount:.2f}，实付 ¥{paid:.2f}")
+    print(f"退货：{target['name']} ¥{target['price']:.2f} × {qty}")
+    print(f"退货项已付（按比例分摊）：¥{proportional:.2f}")
+
+    def show(label: str, mode: str) -> None:
+        if mode == "proportional":
+            refund, retained_paid = proportional, round(paid - proportional, 2)
+            note = "按金额比例退券"
+        else:
+            if coupon_amount > 0 and retained < threshold:
+                refund, retained_paid = 0.0, paid
+                note = f"退货后剩余 ¥{retained:.2f} < 门槛 ¥{threshold:.2f}，券整张扣回"
+            else:
+                refund, retained_paid = proportional, round(paid - proportional, 2)
+                note = "退货后仍满足门槛，按比例退券"
+        diff = round(retained_paid - retained, 2)
+        relation = f"省 ¥{abs(diff):.2f}" if diff < 0 else f"多花 ¥{diff:.2f}"
+        print(f"\n[{label}] {note}")
+        print(f"  预计退款：¥{refund:.2f}")
+        print(f"  保留商品实际成本：¥{retained_paid:.2f}"
+              f"（原价 ¥{retained:.2f}，{relation}）")
+        if mode != "proportional" and refund == 0 and coupon_amount > 0:
+            print("  风险：退款可能为 0，相当于券被整张扣回。")
+
+    if rule == "proportional":
+        show("按比例退券", "proportional")
+    elif rule == "full_clawback":
+        show("整张券扣回", "full_clawback")
+    else:
+        print("\n退货规则未知，以下两种可能都列出（最终以退货页预计退款为准）：")
+        show("按比例退券", "proportional")
+        show("整张券扣回", "full_clawback")
+
+    print("\n建议：不要为了凑单买不需要的东西再退；直接买需要的商品通常更干净。"
+          "退货前先看券的退款规则。")
     return 0
 
 
@@ -739,7 +861,10 @@ def cmd_seed(args, store: Store, cfg: dict) -> int:
             source = "慢慢买"
     except HistorySourceError as e:
         print(f"导入失败：{e}")
-        print("可用 --csv 提供自己的历史数据（表头 datetime,price）。")
+        print("可依次尝试：")
+        print("  1) --csv 导入自己的历史价（表头 datetime,price）")
+        print("  2) 从商品页/第三方比价工具复制历史价，整理成 CSV")
+        print("  3) 先跑几天 check，用本地采样积累；样本不足时不要相信概率数字")
         return 1
 
     points = dedupe(points)
@@ -1057,21 +1182,27 @@ def cmd_plan(args, store: Store, cfg: dict) -> int:
     now = time.time()
     price_point, inv, variants = None, None, []
     fetch_error = ""
-    try:
-        monitor = get_monitor(p.platform, cfg)
-        price_point, inv = monitor.fetch(p.pid)
-        variants = list(monitor.variants(p.pid) or [])
-        if getattr(monitor, "last_name", "") and not p.name:
-            p.name = monitor.last_name
-            store.update_product(p)
-    except Exception as e:  # noqa: BLE001
-        fetch_error = str(e)
+    price_source = "verified"
+    if getattr(args, "price", None) is not None:
+        price_point = PricePoint(now, float(args.price))
+        price_source = "manual"
+    else:
+        try:
+            monitor = get_monitor(p.platform, cfg)
+            price_point, inv = monitor.fetch(p.pid)
+            variants = list(monitor.variants(p.pid) or [])
+            if getattr(monitor, "last_name", "") and not p.name:
+                p.name = monitor.last_name
+                store.update_product(p)
+        except Exception as e:  # noqa: BLE001
+            fetch_error = str(e)
+            price_source = "failed"
 
-    if price_point:
+    if price_point and price_source != "manual":
         store.add_price(did, price_point)
-    if inv:
+    if inv and price_source != "manual":
         store.add_inventory(did, inv)
-    if variants:
+    if variants and price_source != "manual":
         store.add_variants(did, variants)
 
     if fetch_error:
@@ -1080,10 +1211,13 @@ def cmd_plan(args, store: Store, cfg: dict) -> int:
             variants = store.latest_variants(did)
         if price_point is None:
             price_point = store.last_price(did)
+            if price_point is not None:
+                price_source = "stored"
         if inv is None:
             inv = store.last_inventory(did)
         if price_point is None and not variants:
-            print("没有可用的价格/库存数据，无法给出购买方案。")
+            print("没有可用的价格/库存数据，无法给出购买方案；"
+                  "可加 --price 手动传入价格继续计算。")
             return 1
         print("（以下使用上次记录的数据，结论可能滞后）")
 
@@ -1127,6 +1261,42 @@ def cmd_plan(args, store: Store, cfg: dict) -> int:
     else:
         action, reason = "买", "当前价格适合入手"
 
+    try:
+        if args.coupons:
+            rules = _load_rules(args.coupons)
+        elif getattr(args, "demo", False):
+            rules = demo_rules(p.platform)
+        else:
+            rules = []
+    except Exception as e:  # noqa: BLE001
+        print(f"券配置读取失败：{e}")
+        return 1
+    if p.platform == "taobao" and not any(_is_vip_rule(r) for r in rules):
+        rules = rules + [DiscountRule("vip_88_est", "88VIP 95折", "percent", 0.95,
+                                     priority=50, source="estimated")]
+    base_rules = [r for r in rules if not _is_vip_rule(r)]
+    vip_rules = [r for r in rules if _is_vip_rule(r)]
+    base_deal = best_price(buy_price, base_rules) if buy_price else None
+    vip_deal = best_price(buy_price, rules) if buy_price else None
+
+    source_txt = {"manual": "手动价（未验证）", "stored": "上次记录（可能滞后）",
+                  "failed": "抓取失败"}.get(price_source, "实时抓取")
+    stamps = [x.ts for x in (price_point, inv) if x] + [v.ts for v in variants]
+    data_ts = max(stamps) if stamps else now
+
+    if getattr(args, "brief", False):
+        print(f"【结论】{action} — {reason}")
+        if buy_price:
+            mode = "你的券" if args.coupons else (
+                "演示券" if getattr(args, "demo", False) else "无券")
+            print(f"实付：无会员 {money(base_deal.final)} / "
+                  f"有会员 {money(vip_deal.final)}（{mode}）")
+        else:
+            print("实付：无货/无价格")
+        timing = _timing_text(args) or "券/活动截止未提供"
+        print(f"时效：数据 {fmt_ts(data_ts)} · {timing}")
+        return 0
+
     print(f"【结论】{action} — {reason}")
     print()
     stock_txt = ("有货" if in_stock_any else "无货") if in_stock_any is not None else "库存未知"
@@ -1134,7 +1304,7 @@ def cmd_plan(args, store: Store, cfg: dict) -> int:
         price_txt = f"{money(buy_price)}（{buy_variant.variant}）"
     else:
         price_txt = money(buy_price) if buy_price else "无货/无价格"
-    print(f"商品：{p.name or did}  [{p.platform}]  {price_txt} · {stock_txt}")
+    print(f"商品：{p.name or did}  [{p.platform}]  {price_txt} · {stock_txt} · {source_txt}")
 
     # ---------- 尺码 ----------
     kind = args.kind if args.kind != "auto" else sizing.infer_kind(p.name, p.category)
@@ -1169,21 +1339,14 @@ def cmd_plan(args, store: Store, cfg: dict) -> int:
                 print(f"  依据：{size_match.note}")
 
     # ---------- 购买方案 ----------
-    print("购买方案：" if args.coupons
-          else "购买方案（演示券，未计入你的个人券）：")
+    if args.coupons:
+        plan_title = "购买方案（你的券）："
+    elif getattr(args, "demo", False):
+        plan_title = "购买方案（演示券，未计入你的个人券）："
+    else:
+        plan_title = "购买方案（未提供券，按 0 券计算）："
+    print(plan_title)
     if buy_price:
-        try:
-            rules = _load_rules(args.coupons) if args.coupons else demo_rules(p.platform)
-        except Exception as e:  # noqa: BLE001
-            print(f"  券配置读取失败：{e}")
-            return 1
-        if p.platform == "taobao" and not any(_is_vip_rule(r) for r in rules):
-            rules = rules + [DiscountRule("vip_88_est", "88VIP 95折（估算）",
-                                         "percent", 0.95, priority=50)]
-        base_rules = [r for r in rules if not _is_vip_rule(r)]
-        vip_rules = [r for r in rules if _is_vip_rule(r)]
-        base_deal = best_price(buy_price, base_rules)
-        vip_deal = best_price(buy_price, rules)
         print(f"  无会员：{money(base_deal.final)}（{_describe_deal(base_deal)}）")
         if vip_rules:
             mark = "  ← 你的方案" if args.vip else ""
@@ -1196,7 +1359,8 @@ def cmd_plan(args, store: Store, cfg: dict) -> int:
             _score, rule, gap, extra = filler
             net = gap - extra
             net_txt = f"净多花 {money(net)}" if net > 0 else f"反而省 {money(-net)}"
-            print(f"  凑单：再凑 {money(gap)} 可多减 {money(extra)}（{rule.name}，{net_txt}）")
+            print(f"  凑单：再凑 {money(gap)} 可多减 {money(extra)}"
+                  f"（{_rule_label(rule)}，{net_txt}）")
         else:
             print("  凑单：当前金额已接近档位，或再凑不划算")
     else:
@@ -1223,8 +1387,9 @@ def cmd_plan(args, store: Store, cfg: dict) -> int:
     else:
         print(f"  {history_txt} · 样本不足，先跑几天 check 再给概率")
 
-    stamps = [x.ts for x in (price_point, inv) if x] + [v.ts for v in variants]
-    print(f"数据时间：{fmt_ts(max(stamps) if stamps else now)}")
+    print(f"数据时间：{fmt_ts(data_ts)}")
+    timing = _timing_text(args)
+    print(f"时效：{timing}" if timing else "时效：券/活动截止未提供，以商品页/结算页为准")
 
     if price_point and buy_price and abs(price_point.price - buy_price) >= 1:
         print(f"价差说明：接口价 {money(price_point.price)}，有货最低 {money(buy_price)}"
@@ -1464,8 +1629,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("key", help="商品链接 / platform:pid / 序号 / 裸数字编号（需配 --platform）")
     p.add_argument("--platform", choices=["jd", "taobao", "uniqlo"],
                    help="裸数字编号所属平台（京东/淘宝必填，避免误判）")
-    p.add_argument("--coupons", help="券配置 JSON（缺省用内置演示券）")
+    p.add_argument("--coupons", help="券配置 JSON（缺省按 0 券计算）")
+    p.add_argument("--demo", action="store_true", help="使用内置演示券（会标注估算）")
     p.add_argument("--vip", action="store_true", help="我有 88VIP / PLUS，优先展示会员方案")
+    p.add_argument("--brief", action="store_true", help="一句话模式：结论 + 实付 + 时效（3 行内）")
+    p.add_argument("--price", type=float,
+                   help="手动价：跳过抓取（断网/登录墙时用，标注未验证）")
+    p.add_argument("--deadline", help="活动/赠品截止时间，如 2026-11-12")
+    p.add_argument("--coupon-valid-to", help="券有效期截止，如 2026-11-12")
+    p.add_argument("--price-protection", help="价保说明，如 30天 / 大促价保")
     p.add_argument("--height", type=float, help="身高 cm")
     p.add_argument("--weight", type=float, help="体重 kg")
     p.add_argument("--waist", type=float, help="腰围 cm（裤装必需）")
@@ -1479,12 +1651,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("deal", help="优惠叠加最优解计算")
     p.add_argument("--price", type=float, required=True, help="商品现价")
     p.add_argument("--platform", choices=list(PLATFORMS), default="taobao")
-    p.add_argument("--coupons", help="券配置 JSON 文件（缺省用内置演示券）")
+    p.add_argument("--coupons", help="券配置 JSON 文件（缺省按 0 券计算）")
+    p.add_argument("--demo", action="store_true", help="使用内置演示券（会标注估算）")
     p.set_defaults(fn=cmd_deal)
 
     p = sub.add_parser("cart", help="购物车跨店凑单优化（JSON 文件）")
     p.add_argument("file", help='格式：{"items":[...],"coupons":[...]}')
     p.set_defaults(fn=cmd_cart)
+
+    p = sub.add_parser("return", help="凑单后退货净价测算")
+    p.add_argument("--order", required=True, help="订单 JSON：items + coupon + paid")
+    p.add_argument("--return", dest="return_sku", required=True, help="要退货的 SKU")
+    p.add_argument("--qty", type=int, default=1, help="退货数量（默认 1）")
+    p.add_argument("--rule", choices=["proportional", "full_clawback", "unknown", "uniqlo"],
+                   help="券退回规则；uniqlo 等同 full_clawback")
+    p.set_defaults(fn=cmd_return)
 
     p = sub.add_parser("demo", help="离线演示全部分析链路")
     p.set_defaults(fn=cmd_demo)

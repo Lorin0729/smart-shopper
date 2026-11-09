@@ -43,7 +43,8 @@ class FakeMonitor:
 def _args(**kw):
     base = dict(key="taobao:" + TID, platform=None, coupons=None, vip=False,
                 height=None, weight=None, waist=None, chest=None, gender="men",
-                kind="auto", category=None)
+                kind="auto", category=None, demo=False, brief=False, price=None,
+                deadline="", coupon_valid_to="", price_protection="")
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -130,6 +131,43 @@ class TestPlan(unittest.TestCase):
         self.assertTrue(got.url.startswith("https://item.jd.com/"))
         self.assertIn("无会员：", out)
         other.conn.close()
+
+    def test_no_coupons_fail_closed(self):
+        variants = [_variant("乳白色", "L", 899, True, 5)]
+        code, out = self._run(variants)
+        self.assertEqual(code, 0)
+        self.assertIn("无会员：¥899（无可用优惠）", out)
+        self.assertIn("88VIP 95折（估算）", out)
+        self.assertNotIn("店铺券", out)
+
+    def test_demo_flag_uses_demo_coupons(self):
+        variants = [_variant("乳白色", "L", 899, True, 5)]
+        code, out = self._run(variants, demo=True)
+        self.assertEqual(code, 0)
+        self.assertIn("演示券", out)
+        self.assertIn("店铺券", out)
+
+    def test_brief_is_three_lines(self):
+        variants = [_variant("乳白色", "L", 899, True, 5)]
+        code, out = self._run(variants, brief=True, height=178, weight=70)
+        lines = [line for line in out.strip().splitlines() if line.strip()]
+        self.assertEqual(code, 0)
+        self.assertEqual(len(lines), 3)
+        self.assertIn("【结论】", lines[0])
+        self.assertIn("实付：", lines[1])
+        self.assertIn("时效：", lines[2])
+
+    def test_manual_price_skips_network(self):
+        buf = io.StringIO()
+        with mock.patch("main.get_monitor",
+                        side_effect=AssertionError("should not fetch")), \
+                redirect_stdout(buf):
+            code = main.cmd_plan(_args(price=399, height=178), self.store, {})
+        out = buf.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("手动价（未验证）", out)
+        self.assertIn("¥399", out)
+        self.assertIn("按 0 券计算", out)
 
 
 class TestSizing(unittest.TestCase):
